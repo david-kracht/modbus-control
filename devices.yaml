@@ -1,0 +1,5 @@
+devices:
+- name: SimDevice
+  host: 127.0.0.1
+  port: 5020
+  schema_name: v10

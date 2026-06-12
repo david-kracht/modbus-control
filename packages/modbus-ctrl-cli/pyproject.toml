@@ -1,0 +1,22 @@
+[project]
+name = "modbus-ctrl-cli"
+version = "0.1.0"
+description = "CLI tool for Modbus Control Suite"
+requires-python = ">=3.11"
+dependencies = [
+    "typer>=0.12.0",
+    "rich>=13.0.0",
+    "modbus-ctrl-core",
+    "modbus-ctrl-contracts",
+]
+
+[project.scripts]
+modbus-ctrl = "modbus_ctrl_cli.main:app"
+
+[tool.uv.sources]
+modbus-ctrl-core = { workspace = true }
+modbus-ctrl-contracts = { workspace = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

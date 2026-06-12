@@ -1,0 +1,16 @@
+[project]
+name = "modbus-ctrl-core"
+version = "0.1.0"
+description = "Core async library for Modbus Control Suite"
+requires-python = ">=3.11"
+dependencies = [
+    "pymodbus>=3.8.0",
+    "modbus-ctrl-contracts",
+]
+
+[tool.uv.sources]
+modbus-ctrl-contracts = { workspace = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

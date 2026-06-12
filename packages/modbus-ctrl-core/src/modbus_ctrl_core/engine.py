@@ -1,0 +1,203 @@
+import json
+import logging
+from pathlib import Path
+from typing import Any
+
+from modbus_schema_common.models import (
+    ModbusInterfaceSpecification,
+    ModbusRegister,
+    ModbusRegisterBase,
+    ModbusRegisterType,
+)
+from modbus_ctrl_contracts import DeviceConfig
+from modbus_ctrl_core.client import ModbusClientWrapper
+from modbus_ctrl_core.aggregator import build_read_blocks, ReadBlock
+from modbus_ctrl_core import translator
+
+logger = logging.getLogger(__name__)
+
+def resolve_schema(schema_name_or_path: str) -> ModbusInterfaceSpecification:
+    """
+    Resolve and load the JSON schema.
+    Supports namespaced keys (e.g. "modbus_config/v10"), bare version keys (e.g. "v10"), or raw file paths.
+    """
+    cleaned = schema_name_or_path.strip()
+
+    # 1. Try namespaced resolution (e.g., "modbus_config/v10" or "modbus_config:v10")
+    if "/" in cleaned or ":" in cleaned:
+        delim = "/" if "/" in cleaned else ":"
+        parts = cleaned.split(delim, 1)
+        pkg, ver = parts[0], parts[1]
+        try:
+            from modbus_schema_common.registry import get_registry
+            registry = get_registry(pkg)
+            if ver in registry.versions():
+                return registry.load(ver)
+        except Exception as e:
+            logger.debug("Failed to load namespaced schema %s: %s", cleaned, e)
+
+    # 2. Try bare version lookup across all registered packages
+    try:
+        from modbus_schema_common.registry import _registered_packages, get_registry
+        # Auto-register modbus_config as fallback if not registered yet
+        if "modbus_config" not in _registered_packages:
+            try:
+                import modbus_config
+            except ImportError:
+                pass
+        for pkg, registry in _registered_packages.items():
+            if cleaned in registry.versions():
+                logger.info("Loading schema '%s' from registered package %s", cleaned, pkg)
+                return registry.load(cleaned)
+    except Exception as e:
+        logger.debug("Failed to search registered packages for %s: %s", cleaned, e)
+
+    # 3. Fallback: load as a file path
+    path = Path(cleaned)
+    if not path.is_absolute():
+        path = Path.cwd() / path
+
+    if not path.exists():
+        raise FileNotFoundError(f"Schema not found in registry or at file path: {schema_name_or_path}")
+
+    logger.info("Loading schema from file: %s", path)
+    with open(path, "r", encoding="utf-8") as f:
+        return ModbusInterfaceSpecification.model_validate_json(f.read())
+
+class ModbusControlEngine:
+    def __init__(self, device: DeviceConfig):
+        self.device = device
+        self.schema = resolve_schema(device.schema_name)
+        self.client = ModbusClientWrapper(host=device.host, port=device.port)
+        
+        # Map registers by name and decimal address for fast lookup
+        self.registers_by_name: dict[str, ModbusRegisterBase] = {
+            r.name: r for r in self.schema.registers
+        }
+        self.registers_by_addr: dict[int, ModbusRegisterBase] = {
+            r.address_dec: r for r in self.schema.registers
+        }
+
+    async def read_all(self, gap_threshold: int = 5) -> dict[str, Any]:
+        """
+        Connects to the Modbus device, reads all configured registers in optimal batches,
+        unpacks raw registers into scaled values, and returns them as a key-value dictionary.
+        """
+        await self.client.connect()
+        if not self.client.connected:
+            raise ConnectionError(f"Could not connect to Modbus device at {self.device.host}:{self.device.port}")
+
+        blocks = build_read_blocks(self.schema.registers, gap_threshold=gap_threshold)
+        results: dict[str, Any] = {}
+
+        for block in blocks:
+            start = block["start_addr"]
+            count = block["count"]
+            rtype = block["register_type"]
+            slave = self.device.unit_id
+
+            logger.debug("Reading block: Type=%s, Start=%d, Count=%d", rtype.value, start, count)
+
+            try:
+                if rtype == ModbusRegisterType.DISCRETE_INPUT:
+                    res = await self.client.client.read_discrete_inputs(start, count=count, device_id=slave)
+                elif rtype == ModbusRegisterType.COIL:
+                    res = await self.client.client.read_coils(start, count=count, device_id=slave)
+                elif rtype == ModbusRegisterType.INPUT_REGISTER:
+                    res = await self.client.client.read_input_registers(start, count=count, device_id=slave)
+                elif rtype == ModbusRegisterType.HOLDING_REGISTER:
+                    res = await self.client.client.read_holding_registers(start, count=count, device_id=slave)
+                else:
+                    continue
+
+                if res.isError():
+                    logger.error("Modbus error reading block %s[%d:%d]: %s", rtype.value, start, start+count, res)
+                    continue
+
+                # Unpack each register in the block
+                for reg in block["registers"]:
+                    offset = reg.address_dec - start
+                    
+                    if rtype in (ModbusRegisterType.DISCRETE_INPUT, ModbusRegisterType.COIL):
+                        # Bit-level reading
+                        if offset < len(res.bits):
+                            results[reg.name] = res.bits[offset]
+                    else:
+                        # Register-level reading
+                        # Determine number of registers
+                        num_regs = reg.register_count
+                        if offset + num_regs <= len(res.registers):
+                            raw_regs = res.registers[offset : offset + num_regs]
+                            val = translator.unpack_register_value(
+                                raw_regs,
+                                reg.data_type,
+                                byte_order="big",
+                                word_order="big",
+                            )
+                            results[reg.name] = val
+
+            except Exception as e:
+                logger.error("Exception reading block %s[%d:%d]: %s", rtype.value, start, start+count, e)
+
+        return results
+
+    async def write_registers(self, writes: dict[str, Any]) -> dict[str, str]:
+        """
+        Executes writes for the given register values.
+        Key can be register name or address string.
+        """
+        await self.client.connect()
+        if not self.client.connected:
+            raise ConnectionError(f"Could not connect to Modbus device at {self.device.host}:{self.device.port}")
+
+        results: dict[str, str] = {}
+        slave = self.device.unit_id
+
+        for key, val in writes.items():
+            # Resolve key to ModbusRegisterBase
+            reg = self.registers_by_name.get(key)
+            if not reg:
+                # Try parsing as integer address
+                try:
+                    addr_dec = int(key)
+                    reg = self.registers_by_addr.get(addr_dec)
+                except ValueError:
+                    pass
+
+            if not reg:
+                results[key] = f"Error: Register not found in schema"
+                continue
+
+            rtype = reg.register_type
+            if rtype not in (ModbusRegisterType.COIL, ModbusRegisterType.HOLDING_REGISTER):
+                results[reg.name] = f"Error: Register type {rtype.value} is read-only"
+                continue
+
+            try:
+                if rtype == ModbusRegisterType.COIL:
+                    # Coils accept raw boolean value
+                    write_val = bool(val)
+                    res = await self.client.client.write_coil(reg.address_dec, write_val, device_id=slave)
+                else:
+                    # Holding Register packing
+                    raw_regs = translator.pack_register_value(
+                        val,
+                        reg.data_type,
+                        byte_order="big",
+                        word_order="big",
+                    )
+                    if len(raw_regs) == 1:
+                        res = await self.client.client.write_register(reg.address_dec, raw_regs[0], device_id=slave)
+                    else:
+                        res = await self.client.client.write_registers(reg.address_dec, raw_regs, device_id=slave)
+
+                if res.isError():
+                    results[reg.name] = f"Error: {res}"
+                else:
+                    results[reg.name] = f"Success"
+
+            except Exception as e:
+                logger.error("Failed to write to register %s: %s", reg.name, e)
+                results[reg.name] = f"Error: {e}"
+
+        return results

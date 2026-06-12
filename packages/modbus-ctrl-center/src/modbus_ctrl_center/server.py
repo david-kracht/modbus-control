@@ -1,0 +1,385 @@
+import asyncio
+import logging
+import os
+import time
+from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Dict, Any, Set, Optional
+
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse, JSONResponse
+
+from modbus_ctrl_contracts import AppConfig, DeviceConfig, WriteBatchRequest, TelemetryDeltaResponse
+from modbus_ctrl_core import ModbusControlEngine, resolve_schema
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+logger = logging.getLogger("modbus-ctrl-center")
+
+# Path to the shared devices YAML file
+def get_devices_yaml_path() -> Path:
+    path_str = os.getenv("MODBUS_DEVICES_YAML", "devices.yaml")
+    return Path(path_str).resolve()
+
+# Global caches and tasks
+active_websockets: Set[WebSocket] = set()
+device_caches: Dict[str, Dict[str, Any]] = {}  # device_name -> cached_register_values
+polling_tasks: Dict[str, asyncio.Task] = {}     # device_name -> polling task
+device_status: Dict[str, Dict[str, Any]] = {}   # device_name -> {online, last_poll, error}
+
+
+async def _broadcast(payload: str):
+    """Send a JSON payload to all connected WebSocket clients."""
+    dead_sockets: Set[WebSocket] = set()
+    for ws in active_websockets:
+        try:
+            await ws.send_text(payload)
+        except Exception:
+            dead_sockets.add(ws)
+    if dead_sockets:
+        active_websockets.difference_update(dead_sockets)
+
+
+async def poll_device(device_name: str):
+    """Background loop polling a device and broadcasting deltas via WebSockets."""
+    logger.info("Starting polling loop for device: %s", device_name)
+    cache = device_caches.setdefault(device_name, {})
+
+    while True:
+        try:
+            # Load configuration dynamically to respect changes (interval, active status, host)
+            config_path = get_devices_yaml_path()
+            app_config = AppConfig.load_from_yaml(config_path)
+            device = next((d for d in app_config.devices if d.name == device_name), None)
+
+            if not device or not device.active:
+                logger.info("Device '%s' is no longer active or configured. Stopping poll loop.", device_name)
+                break
+
+            # Initialize engine for this iteration
+            engine = ModbusControlEngine(device)
+            new_vals = await engine.read_all()
+
+            now = time.time()
+
+            # Mark device as online
+            prev_online = device_status.get(device_name, {}).get("online")
+            device_status[device_name] = {"online": True, "last_poll": now, "error": None}
+
+            # Broadcast status update if state changed to online
+            if prev_online is not True:
+                await _broadcast_status(device_name)
+
+            # Calculate deltas
+            deltas = {}
+            for k, v in new_vals.items():
+                if k not in cache or cache[k] != v:
+                    deltas[k] = v
+                    cache[k] = v
+
+            # If deltas exist, broadcast to all connected WebSockets
+            if deltas and active_websockets:
+                # Format enum values for the UI in delta response (literal mode)
+                # Send raw ordinal values — frontend resolves enum labels from schema
+                msg = TelemetryDeltaResponse(
+                    device_name=device_name,
+                    timestamp=now,
+                    deltas=deltas
+                )
+                await _broadcast(msg.model_dump_json())
+                logger.debug("Broadcasting delta update for %s", device_name)
+
+            # Sleep matching device configuration interval
+            await asyncio.sleep(device.polling_interval)
+
+        except asyncio.CancelledError:
+            logger.info("Polling loop for device '%s' cancelled.", device_name)
+            break
+        except Exception as e:
+            logger.error("Error in polling loop for device '%s': %s", device_name, e)
+            # Mark device as offline and broadcast
+            prev_online = device_status.get(device_name, {}).get("online")
+            device_status[device_name] = {
+                "online": False,
+                "last_poll": device_status.get(device_name, {}).get("last_poll"),
+                "error": str(e),
+            }
+            if prev_online is not False:
+                await _broadcast_status(device_name)
+            await asyncio.sleep(5.0)  # wait before retrying on error
+
+
+async def _broadcast_status(device_name: str):
+    """Broadcast a device status update message to all WebSocket clients."""
+    status = device_status.get(device_name, {})
+    payload = {
+        "type": "status_update",
+        "device_name": device_name,
+        "online": status.get("online", False),
+        "last_poll": status.get("last_poll"),
+        "error": status.get("error"),
+    }
+    import json
+    await _broadcast(json.dumps(payload))
+
+
+def start_device_polling(device_name: str):
+    if device_name in polling_tasks and not polling_tasks[device_name].done():
+        return
+    task = asyncio.create_task(poll_device(device_name))
+    polling_tasks[device_name] = task
+
+
+def stop_device_polling(device_name: str):
+    task = polling_tasks.get(device_name)
+    if task and not task.done():
+        task.cancel()
+
+
+def restart_device_polling(device_name: str):
+    """Stop any existing task and start a fresh one. Also clears the value cache."""
+    stop_device_polling(device_name)
+    polling_tasks.pop(device_name, None)
+    device_caches.pop(device_name, None)
+    # Mark as unknown/offline until first successful poll
+    device_status[device_name] = {
+        "online": False,
+        "last_poll": None,
+        "error": "Restarting...",
+    }
+    start_device_polling(device_name)
+
+
+def sync_polling_tasks():
+    """Start or stop polling loops based on current devices.yaml."""
+    config_path = get_devices_yaml_path()
+    app_config = AppConfig.load_from_yaml(config_path)
+    active_device_names = {d.name for d in app_config.devices if d.active}
+
+    # Stop tasks for removed/inactive devices
+    for name in list(polling_tasks.keys()):
+        if name not in active_device_names:
+            logger.info("Stopping polling task for %s", name)
+            stop_device_polling(name)
+            polling_tasks.pop(name, None)
+
+    # Start tasks for new/active devices
+    for name in active_device_names:
+        if name not in polling_tasks or polling_tasks[name].done():
+            logger.info("Starting polling task for %s", name)
+            start_device_polling(name)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup: sync and launch polling
+    sync_polling_tasks()
+    yield
+    # Shutdown: cancel all tasks
+    for name, task in list(polling_tasks.items()):
+        task.cancel()
+    await asyncio.gather(*polling_tasks.values(), return_exceptions=True)
+
+app = FastAPI(title="Modbus Control Suite API", lifespan=lifespan)
+
+# ---------------------------------------------------------------------------
+# API Endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/api/devices")
+async def get_devices():
+    config_path = get_devices_yaml_path()
+    app_config = AppConfig.load_from_yaml(config_path)
+    return app_config.devices
+
+
+@app.get("/api/devices/status")
+async def get_all_device_status():
+    """Return the current online/offline status for all known devices."""
+    return device_status
+
+
+@app.post("/api/devices")
+async def add_device(device: DeviceConfig):
+    config_path = get_devices_yaml_path()
+    app_config = AppConfig.load_from_yaml(config_path)
+
+    if any(d.name == device.name for d in app_config.devices):
+        raise HTTPException(status_code=400, detail=f"Device name '{device.name}' already exists.")
+
+    app_config.devices.append(device)
+    app_config.save_to_yaml(config_path)
+    sync_polling_tasks()
+    return {"status": "ok"}
+
+
+@app.put("/api/devices/{name}")
+async def update_device(name: str, device: DeviceConfig):
+    config_path = get_devices_yaml_path()
+    app_config = AppConfig.load_from_yaml(config_path)
+
+    idx_to_edit = None
+    for idx, d in enumerate(app_config.devices):
+        if d.name == name:
+            idx_to_edit = idx
+            break
+
+    if idx_to_edit is None:
+        raise HTTPException(status_code=404, detail=f"Device '{name}' not found.")
+
+    if any(i != idx_to_edit and d.name == device.name for i, d in enumerate(app_config.devices)):
+        raise HTTPException(status_code=400, detail=f"Device name '{device.name}' already exists.")
+
+    app_config.devices[idx_to_edit] = device
+    app_config.save_to_yaml(config_path)
+
+    # Always restart the polling task so the new host/port/interval takes effect immediately.
+    # If the name changed, stop the old task first.
+    if device.name != name:
+        stop_device_polling(name)
+        polling_tasks.pop(name, None)
+        device_caches.pop(name, None)
+        device_status.pop(name, None)
+
+    if device.active:
+        restart_device_polling(device.name)
+    else:
+        stop_device_polling(device.name)
+        polling_tasks.pop(device.name, None)
+
+    return {"status": "ok", "device": device}
+
+
+@app.delete("/api/devices/{name}")
+async def delete_device(name: str):
+    config_path = get_devices_yaml_path()
+    app_config = AppConfig.load_from_yaml(config_path)
+
+    found = False
+    for idx, d in enumerate(app_config.devices):
+        if d.name == name:
+            app_config.devices.pop(idx)
+            found = True
+            break
+
+    if not found:
+        raise HTTPException(status_code=404, detail=f"Device '{name}' not found.")
+
+    app_config.save_to_yaml(config_path)
+    stop_device_polling(name)
+    polling_tasks.pop(name, None)
+    device_caches.pop(name, None)
+    device_status.pop(name, None)
+    return {"status": "ok"}
+
+
+@app.get("/api/devices/{name}/schema")
+async def get_device_schema(name: str):
+    config_path = get_devices_yaml_path()
+    app_config = AppConfig.load_from_yaml(config_path)
+    device = next((d for d in app_config.devices if d.name == name), None)
+    if not device:
+        raise HTTPException(status_code=404, detail=f"Device '{name}' not found.")
+    try:
+        spec = resolve_schema(device.schema_name)
+        return spec
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Could not load schema: {e}")
+
+
+@app.get("/api/devices/{name}/values")
+async def get_device_values(name: str):
+    # Return from our fast cache
+    if name not in device_caches:
+        raise HTTPException(status_code=404, detail=f"Device '{name}' values not available.")
+    return device_caches[name]
+
+
+@app.post("/api/devices/{name}/write")
+async def write_device_registers(name: str, request: WriteBatchRequest):
+    config_path = get_devices_yaml_path()
+    app_config = AppConfig.load_from_yaml(config_path)
+    device = next((d for d in app_config.devices if d.name == name), None)
+    if not device:
+        raise HTTPException(status_code=404, detail=f"Device '{name}' not found.")
+    try:
+        engine = ModbusControlEngine(device)
+        results = await engine.write_registers(request.writes)
+        return results
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to execute writes: {e}")
+
+# ---------------------------------------------------------------------------
+# WebSocket Endpoint
+# ---------------------------------------------------------------------------
+
+@app.websocket("/ws/telemetry")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    active_websockets.add(websocket)
+    logger.info("WebSocket client connected. Total connected: %d", len(active_websockets))
+
+    # Send current status snapshot to the newly connected client
+    import json
+    for dev_name, status in device_status.items():
+        snapshot = {
+            "type": "status_update",
+            "device_name": dev_name,
+            "online": status.get("online", False),
+            "last_poll": status.get("last_poll"),
+            "error": status.get("error"),
+        }
+        try:
+            await websocket.send_text(json.dumps(snapshot))
+        except Exception:
+            break
+
+    try:
+        while True:
+            # Keep socket alive and receive frames
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        active_websockets.discard(websocket)
+        logger.info("WebSocket client disconnected. Total connected: %d", len(active_websockets))
+    except Exception as e:
+        logger.warning("WebSocket error: %s", e)
+        active_websockets.discard(websocket)
+
+# ---------------------------------------------------------------------------
+# SPA static files serving & fallback routing
+# ---------------------------------------------------------------------------
+
+static_dir = Path(__file__).parent / "static"
+
+if static_dir.exists():
+    # Serve static assets
+    app.mount("/assets", StaticFiles(directory=static_dir / "assets"), name="assets")
+
+    @app.get("/{full_path:path}")
+    async def serve_spa(full_path: str):
+        # Prevent intercepting API or WS calls
+        if full_path.startswith("api/") or full_path == "ws/telemetry":
+            raise HTTPException(status_code=404)
+
+        # Check if file exists in static folder (e.g. assets, favicon)
+        target = static_dir / full_path
+        if target.is_file():
+            return FileResponse(target)
+
+        # Fallback to index.html for client-side React Routing
+        return FileResponse(static_dir / "index.html")
+else:
+    logger.warning("SPA static directory not found at: %s. Serve API only mode.", static_dir)
+
+    @app.get("/")
+    async def index():
+        return {"message": "Modbus Control Suite API (API only mode - static frontend not built)"}
+
+
+def main():
+    import uvicorn
+    uvicorn.run("modbus_ctrl_center.server:app", host="0.0.0.0", port=8000, reload=False)
+
+
+if __name__ == "__main__":
+    main()

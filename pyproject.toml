@@ -1,0 +1,18 @@
+[project]
+name = "modbus-control-workspace"
+version = "0.1.0"
+description = "Workspace root for Modbus Control Suite"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.uv]
+workspace = { members = [
+    "packages/*",
+    "../efoy-modbus-config/packages/modbus-schema-common",
+    "../efoy-modbus-config/packages/modbus-config",
+] }
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+]

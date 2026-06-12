@@ -1,0 +1,19 @@
+[project]
+name = "modbus-ctrl-contracts"
+version = "0.1.0"
+description = "Contracts package for Modbus Control Software Suite"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.0.0",
+    "pyyaml>=6.0.0",
+    "modbus-schema-common",
+    "modbus-config",
+]
+
+[tool.uv.sources]
+modbus-schema-common = { workspace = true }
+modbus-config = { workspace = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

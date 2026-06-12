@@ -1,0 +1,8 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Custom premium styling defaults */
+body {
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+}

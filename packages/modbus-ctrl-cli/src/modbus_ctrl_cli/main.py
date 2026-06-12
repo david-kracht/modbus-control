@@ -1,0 +1,556 @@
+import asyncio
+import csv
+import io
+import json
+import os
+import re
+from pathlib import Path
+from typing import List, Optional
+
+import typer
+import yaml
+from rich.console import Console
+from rich.table import Table
+
+from modbus_ctrl_contracts import AppConfig, DeviceConfig
+from modbus_ctrl_core import ModbusControlEngine, resolve_schema
+from modbus_schema_common.models import ModbusRegisterType, ModbusDataType
+
+app = typer.Typer(help="Modbus Control Suite CLI")
+console_output = Console()
+
+def get_devices_yaml_path() -> Path:
+    path_str = os.getenv("MODBUS_DEVICES_YAML", "devices.yaml")
+    return Path(path_str).resolve()
+
+def resolve_device(
+    target: Optional[str] = None,
+    host: Optional[str] = None,
+    port: int = 502,
+    unit_id: int = 1,
+    schema_name: str = "v10",
+) -> DeviceConfig:
+    if host:
+        return DeviceConfig(
+            name=f"AdHoc_{host}",
+            host=host,
+            port=port,
+            unit_id=unit_id,
+            schema_name=schema_name,
+        )
+
+    config_path = get_devices_yaml_path()
+    app_config = AppConfig.load_from_yaml(config_path)
+
+    if not app_config.devices:
+        raise typer.BadParameter("No devices configured in devices.yaml, and no --host override provided.")
+
+    if target is not None:
+        # Check by list index
+        try:
+            idx = int(target)
+            if 0 <= idx < len(app_config.devices):
+                return app_config.devices[idx]
+        except ValueError:
+            pass
+
+        # Check by name
+        for dev in app_config.devices:
+            if dev.name == target:
+                return dev
+        raise typer.BadParameter(f"Target device '{target}' not found by index or name in devices.yaml.")
+
+    # Default to first device
+    return app_config.devices[0]
+
+def extract_pascal_case_words(text: str) -> List[str]:
+    return re.findall(r'\b[A-Z][a-zA-Z0-9]*\b', text)
+
+def parse_ordinal_value(val_str: str) -> float | int:
+    # Remove delimiters at the start if any, but regex handles it
+    m = re.match(r'^-?\d+(?:\.\d+)?', val_str.strip())
+    if not m:
+        raise typer.BadParameter(f"Value '{val_str}' is not a valid numeric value.")
+    num_str = m.group(0)
+    if "." in num_str:
+        return float(num_str)
+    return int(num_str)
+
+# ---------------------------------------------------------------------------
+# Device Management Commands
+# ---------------------------------------------------------------------------
+
+device_app = typer.Typer(help="Manage local Modbus devices in devices.yaml")
+app.add_typer(device_app, name="device")
+
+@device_app.command("add")
+def device_add(
+    host: str = typer.Argument(..., help="Host IP or address"),
+    name: Optional[str] = typer.Option(None, "--name", help="Unique name of the device. Defaults to {host}_{port} if omitted."),
+    port: Optional[int] = typer.Option(None, help="Modbus TCP Port"),
+    unit_id: Optional[int] = typer.Option(None, help="Slave Unit ID"),
+    schema: Optional[str] = typer.Option(None, help="Schema register template"),
+    interval: Optional[float] = typer.Option(None, help="Polling interval in seconds"),
+    active: Optional[bool] = typer.Option(None, "--active/--no-active", help="Whether the device is active"),
+):
+    """Add a new device to the local devices.yaml configuration."""
+    config_path = get_devices_yaml_path()
+    app_config = AppConfig.load_from_yaml(config_path)
+
+    # Build kwargs to only pass parameters that were explicitly specified
+    kwargs = {"host": host}
+    if name is not None:
+        kwargs["name"] = name
+    if port is not None:
+        kwargs["port"] = port
+    if unit_id is not None:
+        kwargs["unit_id"] = unit_id
+    if schema is not None:
+        kwargs["schema_name"] = schema
+    if interval is not None:
+        kwargs["polling_interval"] = interval
+    if active is not None:
+        kwargs["active"] = active
+
+    try:
+        new_device = DeviceConfig(**kwargs)
+    except Exception as e:
+        console_output.print(f"[red]Validation Error: {e}[/red]")
+        raise typer.Exit(code=1)
+
+    # Check if duplicate name
+    for dev in app_config.devices:
+        if dev.name == new_device.name:
+            console_output.print(f"[red]Error: Device with name '{new_device.name}' already exists.[/red]")
+            raise typer.Exit(code=1)
+
+    app_config.devices.append(new_device)
+    app_config.save_to_yaml(config_path)
+    console_output.print(f"[green]Successfully added device '{new_device.name}' ({new_device.host}:{new_device.port}) to {config_path}[/green]")
+
+@device_app.command("edit")
+def device_edit(
+    name_or_index: str = typer.Argument(..., help="Name or index of the device to edit"),
+    new_name: Optional[str] = typer.Option(None, "--name", help="New unique name of the device"),
+    host: Optional[str] = typer.Option(None, "--host", help="New Host IP or address"),
+    port: Optional[int] = typer.Option(None, "--port", help="New Modbus TCP Port"),
+    unit_id: Optional[int] = typer.Option(None, "--unit-id", help="New Slave Unit ID"),
+    schema: Optional[str] = typer.Option(None, "--schema", help="New schema register template"),
+    interval: Optional[float] = typer.Option(None, "--interval", help="New polling interval in seconds"),
+    active: Optional[bool] = typer.Option(None, "--active/--no-active", help="Enable or disable polling for the device"),
+):
+    """Edit an existing device in the local devices.yaml configuration."""
+    config_path = get_devices_yaml_path()
+    app_config = AppConfig.load_from_yaml(config_path)
+
+    idx_to_edit = None
+    try:
+        idx = int(name_or_index)
+        if 0 <= idx < len(app_config.devices):
+            idx_to_edit = idx
+    except ValueError:
+        pass
+
+    if idx_to_edit is None:
+        for idx, dev in enumerate(app_config.devices):
+            if dev.name == name_or_index:
+                idx_to_edit = idx
+                break
+
+    if idx_to_edit is None:
+        console_output.print(f"[red]Error: Device '{name_or_index}' not found.[/red]")
+        raise typer.Exit(code=1)
+
+    target_device = app_config.devices[idx_to_edit]
+
+    # Dump the current device config to dict, update with only set cli values
+    current_data = target_device.model_dump()
+    if new_name is not None:
+        current_data["name"] = new_name if new_name != "" else None
+    if host is not None:
+        current_data["host"] = host
+    if port is not None:
+        current_data["port"] = port
+    if unit_id is not None:
+        current_data["unit_id"] = unit_id
+    if schema is not None:
+        current_data["schema_name"] = schema
+    if interval is not None:
+        current_data["polling_interval"] = interval
+    if active is not None:
+        current_data["active"] = active
+
+    try:
+        updated_device = DeviceConfig(**current_data)
+    except Exception as e:
+        console_output.print(f"[red]Validation Error: {e}[/red]")
+        raise typer.Exit(code=1)
+
+    # Check name collisions
+    for i, dev in enumerate(app_config.devices):
+        if i != idx_to_edit and dev.name == updated_device.name:
+            console_output.print(f"[red]Error: Device with name '{updated_device.name}' already exists.[/red]")
+            raise typer.Exit(code=1)
+
+    app_config.devices[idx_to_edit] = updated_device
+    app_config.save_to_yaml(config_path)
+    console_output.print(f"[green]Successfully updated device '{target_device.name}' -> '{updated_device.name}'[/green]")
+
+@device_app.command("list")
+def device_list():
+    """List all configured Modbus devices."""
+    config_path = get_devices_yaml_path()
+    app_config = AppConfig.load_from_yaml(config_path)
+
+    if not app_config.devices:
+        console_output.print(f"[yellow]No devices configured in {config_path}.[/yellow]")
+        return
+
+    table = Table(title=f"Configured Modbus Devices ({config_path.name})")
+    table.add_column("Index", justify="right", style="cyan")
+    table.add_column("Name", style="bold")
+    table.add_column("Host:Port", style="magenta")
+    table.add_column("Unit ID", justify="right")
+    table.add_column("Schema", style="blue")
+    table.add_column("Interval", justify="right")
+    table.add_column("Active", justify="center")
+
+    for idx, dev in enumerate(app_config.devices):
+        table.add_row(
+            str(idx),
+            dev.name,
+            f"{dev.host}:{dev.port}",
+            str(dev.unit_id),
+            dev.schema_name,
+            f"{dev.polling_interval}s",
+            "[green]Yes[/green]" if dev.active else "[red]No[/red]"
+        )
+    console_output.print(table)
+
+@device_app.command("remove")
+def device_remove(
+    name: str = typer.Argument(..., help="Name or index of the device to remove")
+):
+    """Remove a device from the local devices.yaml configuration."""
+    config_path = get_devices_yaml_path()
+    app_config = AppConfig.load_from_yaml(config_path)
+
+    found = None
+    # Try by index first
+    try:
+        idx = int(name)
+        if 0 <= idx < len(app_config.devices):
+            found = app_config.devices.pop(idx)
+    except ValueError:
+        pass
+
+    # Try by name if not popped by index
+    if not found:
+        for idx, dev in enumerate(app_config.devices):
+            if dev.name == name:
+                found = app_config.devices.pop(idx)
+                break
+
+    if found:
+        app_config.save_to_yaml(config_path)
+        console_output.print(f"[green]Successfully removed device '{found.name}'[/green]")
+    else:
+        console_output.print(f"[red]Error: Device '{name}' not found.[/red]")
+        raise typer.Exit(code=1)
+
+# ---------------------------------------------------------------------------
+# Metadata Listing Command
+# ---------------------------------------------------------------------------
+
+@app.command("list")
+def list_registers(
+    search: Optional[str] = typer.Argument(None, help="Optional search filter substring"),
+    target: Optional[str] = typer.Option(None, "--target", "-t", help="YAML device index or name"),
+    host: Optional[str] = typer.Option(None, "--host", "-h", help="Ad-hoc Modbus IP override"),
+    port: int = typer.Option(502, help="Ad-hoc port override"),
+    unit_id: int = typer.Option(1, help="Ad-hoc Slave Unit ID override"),
+    schema: str = typer.Option("v10", help="Ad-hoc schema override"),
+    view: str = typer.Option("table", help="View format: table, grouped, csv, ini, json, yaml"),
+):
+    """List metadata descriptions of Modbus registers in the device schema."""
+    try:
+        device = resolve_device(target, host, port, unit_id, schema)
+        spec = resolve_schema(device.schema_name)
+    except Exception as e:
+        console_output.print(f"[red]Error resolving schema: {e}[/red]")
+        raise typer.Exit(code=1)
+
+    # Filter registers if search term is provided
+    regs = spec.registers
+    if search:
+        search_lower = search.lower()
+        regs = [
+            r for r in regs
+            if search_lower in r.name.lower() or
+               search_lower in str(r.address_dec) or
+               (r.description and search_lower in r.description.lower())
+        ]
+
+    if view == "json":
+        print(json.dumps([r.model_dump() for r in regs], indent=2))
+        return
+
+    if view == "yaml":
+        print(yaml.dump([r.model_dump() for r in regs], sort_keys=False))
+        return
+
+    if view == "csv":
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(["Name", "AddressDec", "AddressHex", "DataType", "Access", "Unit", "Description"])
+        for r in regs:
+            unit = getattr(r, "unit", "")
+            writer.writerow([r.name, r.address_dec, r.address_hex, r.data_type.value, r.access, unit, r.description])
+        print(output.getvalue())
+        return
+
+    if view == "ini":
+        for r in regs:
+            print(f"[{r.name}]")
+            print(f"address = {r.address_dec}")
+            print(f"type = {r.data_type.value}")
+            print(f"access = {r.access}")
+            if hasattr(r, "unit") and r.unit:
+                print(f"unit = {r.unit}")
+            print(f"description = {r.description}")
+            print()
+        return
+
+    if view == "grouped":
+        # Group by register type
+        groups = {}
+        for r in regs:
+            groups.setdefault(r.register_type.value, []).append(r)
+        
+        for gname, glist in sorted(groups.items()):
+            table = Table(title=f"Register Type: {gname}")
+            table.add_column("Address Dec (Hex)", style="cyan")
+            table.add_column("Name", style="bold")
+            table.add_column("Data Type", style="magenta")
+            table.add_column("Access")
+            table.add_column("Unit")
+            table.add_column("Description")
+            
+            for r in glist:
+                unit = getattr(r, "unit", "") or ""
+                table.add_row(
+                    f"{r.address_dec} ({r.address_hex})",
+                    r.name,
+                    r.data_type.value,
+                    r.access,
+                    unit,
+                    r.description or ""
+                )
+            console_output.print(table)
+        return
+
+    # Default: table
+    table = Table(title=f"Schema Registers: {spec.device_name} (Firmware: {spec.firmware})")
+    table.add_column("Address", style="cyan")
+    table.add_column("Name", style="bold")
+    table.add_column("Data Type", style="magenta")
+    table.add_column("Access", justify="center")
+    table.add_column("Unit", justify="center")
+    table.add_column("Description")
+
+    for r in regs:
+        unit = getattr(r, "unit", "") or ""
+        table.add_row(
+            f"{r.address_dec} ({r.address_hex})",
+            r.name,
+            r.data_type.value,
+            r.access,
+            unit,
+            r.description or ""
+        )
+    console_output.print(table)
+
+# ---------------------------------------------------------------------------
+# Read Command
+# ---------------------------------------------------------------------------
+
+@app.command("read")
+def read_registers(
+    queries: List[str] = typer.Argument(None, help="Register names, addresses, or free text"),
+    target: Optional[str] = typer.Option(None, "--target", "-t", help="YAML device index or name"),
+    host: Optional[str] = typer.Option(None, "--host", "-h", help="Ad-hoc Modbus IP override"),
+    port: int = typer.Option(502, help="Ad-hoc port override"),
+    unit_id: int = typer.Option(1, help="Ad-hoc Slave Unit ID override"),
+    schema: str = typer.Option("v10", help="Ad-hoc schema override"),
+    format: str = typer.Option("console", help="Output format: console, json, yaml, csv, ini"),
+    enum_mode: str = typer.Option("literal", help="Enum formatting: literal (string), ordinal (number)"),
+):
+    """Read register values from a Modbus device."""
+    try:
+        device = resolve_device(target, host, port, unit_id, schema)
+        engine = ModbusControlEngine(device)
+    except Exception as e:
+        console_output.print(f"[red]Error initializing Modbus engine: {e}[/red]")
+        raise typer.Exit(code=1)
+
+    # Resolve target registers to read
+    # Combine query arguments and look for PascalCase words
+    text_query = " ".join(queries or [])
+    extracted_names = extract_pascal_case_words(text_query)
+    
+    # If no PascalCase found but direct arguments provided, try exact match
+    if not extracted_names and queries:
+        extracted_names = queries
+
+    target_regs = []
+    if extracted_names:
+        for name in extracted_names:
+            reg = engine.registers_by_name.get(name)
+            if not reg:
+                # Try by numeric decimal address
+                try:
+                    addr = int(name)
+                    reg = engine.registers_by_addr.get(addr)
+                except ValueError:
+                    pass
+            if reg:
+                target_regs.append(reg)
+    else:
+        # Default: read all registers
+        target_regs = engine.schema.registers
+
+    if not target_regs:
+        console_output.print("[red]Error: No registers resolved from query.[/red]")
+        raise typer.Exit(code=1)
+
+    # Perform Modbus Read
+    async def perform_read():
+        # Temporarily configure engine schema registers to read only target subset
+        original_regs = engine.schema.registers
+        engine.schema.registers = target_regs
+        try:
+            return await engine.read_all()
+        finally:
+            engine.schema.registers = original_regs
+
+    try:
+        raw_results = asyncio.run(perform_read())
+    except Exception as e:
+        console_output.print(f"[red]Error executing Modbus read: {e}[/red]")
+        raise typer.Exit(code=1)
+
+    # Format values based on enum_mode
+    formatted_results = {}
+    for name, val in raw_results.items():
+        reg = engine.registers_by_name[name]
+        # Enum mapping: enum_values keys are int (dict[int, str])
+        if enum_mode == "literal" and reg.enum_values and val is not None:
+            try:
+                int_val = int(val)
+                formatted_results[name] = reg.enum_values.get(int_val, val)
+            except (TypeError, ValueError):
+                formatted_results[name] = val
+        else:
+            formatted_results[name] = val
+
+    # Render output formats
+    if format == "json":
+        print(json.dumps(formatted_results, indent=2))
+        return
+
+    if format == "yaml":
+        print(yaml.dump(formatted_results, sort_keys=False))
+        return
+
+    if format == "csv":
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(["Register", "Value"])
+        for k, v in formatted_results.items():
+            writer.writerow([k, v])
+        print(output.getvalue())
+        return
+
+    if format == "ini":
+        for k, v in formatted_results.items():
+            print(f"{k} = {v}")
+        return
+
+    # Default format: console (with units)
+    for name in [r.name for r in target_regs]:
+        val = formatted_results.get(name)
+        if val is None:
+            console_output.print(f"{name:<35}: [red]Error / Offline[/red]")
+            continue
+        reg = engine.registers_by_name[name]
+        unit = getattr(reg, "unit", "") or ""
+        unit_str = f" {unit}" if unit else ""
+        console_output.print(f"{name:<35}: {val}{unit_str}")
+
+# ---------------------------------------------------------------------------
+# Write Command
+# ---------------------------------------------------------------------------
+
+@app.command("write")
+def write_registers(
+    register_name: str = typer.Argument(..., help="Register name or address string to write to"),
+    value: str = typer.Argument(..., help="Ordinal numeric value to write"),
+    target: Optional[str] = typer.Option(None, "--target", "-t", help="YAML device index or name"),
+    host: Optional[str] = typer.Option(None, "--host", "-h", help="Ad-hoc Modbus IP override"),
+    port: int = typer.Option(502, help="Ad-hoc port override"),
+    unit_id: int = typer.Option(1, help="Ad-hoc Slave Unit ID override"),
+    schema: str = typer.Option("v10", help="Ad-hoc schema override"),
+):
+    """Write an ordinal numeric value to a register."""
+    try:
+        device = resolve_device(target, host, port, unit_id, schema)
+        engine = ModbusControlEngine(device)
+    except Exception as e:
+        console_output.print(f"[red]Error initializing Modbus engine: {e}[/red]")
+        raise typer.Exit(code=1)
+
+    # Parse ordinal numeric value
+    try:
+        parsed_val = parse_ordinal_value(value)
+    except Exception as e:
+        console_output.print(f"[red]Error parsing value: {e}[/red]")
+        raise typer.Exit(code=1)
+
+    # Perform write
+    try:
+        res = asyncio.run(engine.write_registers({register_name: parsed_val}))
+    except Exception as e:
+        console_output.print(f"[red]Error executing Modbus write: {e}[/red]")
+        raise typer.Exit(code=1)
+
+    status = res.get(register_name)
+    # Match back to resolved name for clean feedback
+    resolved_name = register_name
+    reg = engine.registers_by_name.get(register_name)
+    if not reg:
+        try:
+            addr = int(register_name)
+            reg = engine.registers_by_addr.get(addr)
+        except ValueError:
+            pass
+    if reg:
+        resolved_name = reg.name
+        status = res.get(reg.name, status)
+
+    if status == "Success":
+        # Check if we can display an enum literal representation
+        literal_part = ""
+        if reg and reg.enum_values:
+            try:
+                literal_part = f' ("{reg.enum_values.get(int(parsed_val), "")}")'
+                if literal_part == ' ("")':
+                    literal_part = ""
+            except (TypeError, ValueError):
+                pass
+        console_output.print(f"[green]Success: {resolved_name} set to {parsed_val}{literal_part}[/green]")
+    else:
+        console_output.print(f"[red]Failed: {resolved_name} - {status}[/red]")
+        raise typer.Exit(code=1)
+
+if __name__ == "__main__":
+    app()
