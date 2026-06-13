@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useMemo } from "react";
 import { 
   Cpu, Layers, Settings, Play, Trash, Plus, 
   RefreshCw, Wifi, WifiOff, Database, Save, AlertTriangle, Info, Edit 
@@ -12,6 +12,7 @@ interface Device {
   schema_name: string;
   polling_interval: number;
   active: boolean;
+  registers?: string[] | null;
 }
 
 interface Register {
@@ -35,6 +36,12 @@ interface Schema {
   registers: Register[];
 }
 
+interface DeviceStatus {
+  online: boolean;
+  last_poll: number | null;
+  error: string | null;
+}
+
 export default function App() {
   // Device list and active device selection
   const [devices, setDevices] = useState<Device[]>([]);
@@ -43,9 +50,20 @@ export default function App() {
   const [values, setValues] = useState<Record<string, any>>({});
   const [stagedChanges, setStagedChanges] = useState<Record<string, any>>({});
   
+  // Device statuses state
+  const [deviceStatuses, setDeviceStatuses] = useState<Record<string, DeviceStatus>>({});
+  // Periodical tick for relative time updates
+  const [tick, setTick] = useState<number>(0);
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setTick((t) => t + 1);
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
+
   // Connection states
   const [wsConnected, setWsConnected] = useState<boolean>(false);
-  const [loadingSchema, setLoadingSchema] = useState<boolean>(false);
   const [writingStatus, setWritingStatus] = useState<string | null>(null);
 
   // Form and Edit state
@@ -58,6 +76,109 @@ export default function App() {
   const [formSchema, setFormSchema] = useState("");
   const [formInterval, setFormInterval] = useState<number | "">("");
   const [formActive, setFormActive] = useState<boolean>(true);
+  const [formRegisters, setFormRegisters] = useState<string[]>([]);
+  const [availableSchemaRegisters, setAvailableSchemaRegisters] = useState<Register[]>([]);
+  const [selectedRegToAdd, setSelectedRegToAdd] = useState<string>("");
+
+  // Load available registers whenever the schema name changes in the form
+  useEffect(() => {
+    if (!formMode) {
+      setAvailableSchemaRegisters([]);
+      return;
+    }
+    const schemaToFetch = formSchema.trim() || "v10";
+    const fetchFormSchema = async () => {
+      try {
+        const res = await fetch(`/api/schemas/${schemaToFetch}`);
+        if (res.ok) {
+          const schemaData = await res.json();
+          if (schemaData.registers) {
+            setAvailableSchemaRegisters(schemaData.registers);
+          }
+        } else {
+          setAvailableSchemaRegisters([]);
+        }
+      } catch (e) {
+        console.error("Error fetching form schema registers:", e);
+        setAvailableSchemaRegisters([]);
+      }
+    };
+
+    fetchFormSchema();
+  }, [formSchema, formMode]);
+
+  // Derived state: registers in the schema that are not yet added to the allowed whitelist
+  const remainingRegisters = useMemo(() => {
+    return availableSchemaRegisters.filter(
+      (reg) => !formRegisters.includes(reg.name)
+    );
+  }, [availableSchemaRegisters, formRegisters]);
+
+  // Group remaining registers by register_type and sort them ascendingly by address_dec
+  const groupedRegisters = useMemo(() => {
+    const groups: Record<string, Register[]> = {};
+    remainingRegisters.forEach((reg) => {
+      const type = reg.register_type || "other";
+      if (!groups[type]) {
+        groups[type] = [];
+      }
+      groups[type].push(reg);
+    });
+
+    Object.keys(groups).forEach((type) => {
+      groups[type].sort((a, b) => a.address_dec - b.address_dec);
+    });
+
+    return groups;
+  }, [remainingRegisters]);
+
+  // Auto-select the first remaining register from the grouped sorted list
+  useEffect(() => {
+    const typeOrder = ["discrete_input", "coil", "input_register", "holding_register"];
+    const sortedRemaining: Register[] = [];
+    
+    // Flatten grouped registers in typeOrder
+    typeOrder.forEach((type) => {
+      if (groupedRegisters[type]) {
+        sortedRemaining.push(...groupedRegisters[type]);
+      }
+    });
+    // Add any remaining groups that were not in typeOrder
+    Object.keys(groupedRegisters).forEach((type) => {
+      if (!typeOrder.includes(type)) {
+        sortedRemaining.push(...groupedRegisters[type]);
+      }
+    });
+
+    if (sortedRemaining.length > 0) {
+      setSelectedRegToAdd(sortedRemaining[0].name);
+    } else {
+      setSelectedRegToAdd("");
+    }
+  }, [groupedRegisters]);
+
+  const handleAddRegister = () => {
+    if (selectedRegToAdd && !formRegisters.includes(selectedRegToAdd)) {
+      setFormRegisters((prev) => [...prev, selectedRegToAdd]);
+    }
+  };
+
+  const handleMoveRegister = (index: number, direction: "up" | "down") => {
+    const nextIndex = direction === "up" ? index - 1 : index + 1;
+    if (nextIndex < 0 || nextIndex >= formRegisters.length) return;
+
+    setFormRegisters((prev) => {
+      const updated = [...prev];
+      const temp = updated[index];
+      updated[index] = updated[nextIndex];
+      updated[nextIndex] = temp;
+      return updated;
+    });
+  };
+
+  const handleRemoveRegister = (name: string) => {
+    setFormRegisters((prev) => prev.filter((r) => r !== name));
+  };
 
   const handleStartAdd = () => {
     setFormMode("add");
@@ -69,6 +190,7 @@ export default function App() {
     setFormSchema("");
     setFormInterval("");
     setFormActive(true);
+    setFormRegisters([]);
   };
 
   const handleStartEdit = (dev: Device) => {
@@ -81,6 +203,7 @@ export default function App() {
     setFormSchema(dev.schema_name);
     setFormInterval(dev.polling_interval);
     setFormActive(dev.active);
+    setFormRegisters(dev.registers ? [...dev.registers] : []);
   };
 
   const wsRef = useRef<WebSocket | null>(null);
@@ -98,8 +221,21 @@ export default function App() {
       if (data.length > 0 && !selectedDeviceName) {
         setSelectedDeviceName(data[0].name);
       }
+      fetchStatuses();
     } catch (e) {
       console.error("Error fetching devices:", e);
+    }
+  };
+
+  const fetchStatuses = async () => {
+    try {
+      const res = await fetch("/api/devices/status");
+      if (res.ok) {
+        const data = await res.json();
+        setDeviceStatuses(data);
+      }
+    } catch (e) {
+      console.error("Error fetching device statuses:", e);
     }
   };
 
@@ -119,7 +255,6 @@ export default function App() {
   }, [selectedDeviceName]);
 
   const fetchSchemaAndValues = async (name: string) => {
-    setLoadingSchema(true);
     try {
       // Fetch schema
       const schemaRes = await fetch(`/api/devices/${name}/schema`);
@@ -136,14 +271,15 @@ export default function App() {
         const valData = await valRes.json();
         setValues(valData);
       }
+
+      // Also fetch latest statuses
+      fetchStatuses();
     } catch (e) {
       console.error("Error loading device details:", e);
-    } finally {
-      setLoadingSchema(false);
     }
   };
 
-  // 3. Manage WebSocket connection for live deltas
+  // 3. Manage WebSocket connection for live deltas and status updates
   useEffect(() => {
     const loc = window.location;
     const wsProto = loc.protocol === "https:" ? "wss:" : "ws:";
@@ -161,6 +297,19 @@ export default function App() {
     ws.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
+        if (data.type === "status_update") {
+          logger("Status update received: " + JSON.stringify(data));
+          setDeviceStatuses((prev) => ({
+            ...prev,
+            [data.device_name]: {
+              online: data.online,
+              last_poll: data.last_poll,
+              error: data.error
+            }
+          }));
+          return;
+        }
+
         if (data.device_name === selectedDeviceName) {
           logger("Delta telemetry received: " + JSON.stringify(data.deltas));
           setValues((prev) => ({
@@ -185,6 +334,18 @@ export default function App() {
 
   const logger = (msg: string) => {
     console.log(`[Modbus Control] ${msg}`);
+  };
+
+  const getRelativeTime = (lastPoll: number | null | undefined): string => {
+    // Reference tick to ensure component re-evaluates elapsed time on interval ticks
+    if (tick < 0) console.log(tick);
+    if (!lastPoll) return "never";
+    const elapsed = Math.max(0, Math.floor(Date.now() / 1000 - lastPoll));
+    if (elapsed < 60) {
+      return `${elapsed}s ago`;
+    }
+    const mins = Math.floor(elapsed / 60);
+    return `${mins}m ago`;
   };
 
   // 4. Handle staging changes for RW holding registers
@@ -289,6 +450,11 @@ export default function App() {
     if (formInterval !== "") {
       payload.polling_interval = Number(formInterval);
     }
+    if (formRegisters.length > 0) {
+      payload.registers = formRegisters;
+    } else {
+      payload.registers = null;
+    }
 
     try {
       const url = formMode === "add" ? "/api/devices" : `/api/devices/${editingDeviceOriginalName}`;
@@ -306,6 +472,7 @@ export default function App() {
         fetchDevices();
         setFormMode(null);
         setSelectedDeviceName(resolvedName);
+        fetchSchemaAndValues(resolvedName);
       } else {
         const err = await res.json();
         alert(`Error: ${err.detail || "Failed to save device"}`);
@@ -343,6 +510,8 @@ export default function App() {
   const readWriteRegisters = schema?.registers.filter(
     (r) => r.register_type === "holding_register"
   ) || [];
+
+  const activeDevice = devices.find((d) => d.name === selectedDeviceName);
 
   // Format a value for display: float32 always shows 2 decimal places with a dot
   const formatDisplayVal = (val: any, dataType: string): string => {
@@ -473,6 +642,105 @@ export default function App() {
                   className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:border-amber-500"
                 />
               </div>
+              <div className="flex flex-col gap-2">
+                <label className="text-[10px] uppercase font-bold tracking-wider text-slate-500 block">Allowed Registers Whitelist (Ordered)</label>
+                
+                {/* Selected registers list with move/remove actions */}
+                {formRegisters.length > 0 && (
+                  <div className="flex flex-col gap-1.5 bg-slate-950/85 border border-slate-900 p-2.5 rounded-lg max-h-48 overflow-y-auto">
+                    {formRegisters.map((name, index) => (
+                      <div key={name} className="flex items-center justify-between gap-2 p-1.5 bg-slate-900 border border-slate-800 rounded-lg text-xs">
+                        <span className="font-semibold text-slate-200 truncate flex-1">{name}</span>
+                        <div className="flex items-center space-x-0.5 shrink-0">
+                          <button
+                            type="button"
+                            disabled={index === 0}
+                            onClick={() => handleMoveRegister(index, "up")}
+                            className="p-1 hover:bg-slate-800 hover:text-white rounded disabled:opacity-30 disabled:hover:bg-transparent text-slate-400 transition-colors"
+                            title="Move Up"
+                          >
+                            <span className="text-[10px]">▲</span>
+                          </button>
+                          <button
+                            type="button"
+                            disabled={index === formRegisters.length - 1}
+                            onClick={() => handleMoveRegister(index, "down")}
+                            className="p-1 hover:bg-slate-800 hover:text-white rounded disabled:opacity-30 disabled:hover:bg-transparent text-slate-400 transition-colors"
+                            title="Move Down"
+                          >
+                            <span className="text-[10px]">▼</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleRemoveRegister(name)}
+                            className="p-1 hover:bg-red-950/50 hover:text-red-400 rounded text-slate-500 transition-colors"
+                            title="Remove"
+                          >
+                            <Trash className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Dropdown & Add Button */}
+                {remainingRegisters.length > 0 ? (
+                  <div className="flex gap-2 w-full min-w-0">
+                    <select
+                      value={selectedRegToAdd}
+                      onChange={(e) => setSelectedRegToAdd(e.target.value)}
+                      className="flex-1 min-w-0 bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-amber-500 truncate"
+                    >
+                      {Object.entries(groupedRegisters)
+                        .sort(([typeA], [typeB]) => {
+                          const typeOrder = ["discrete_input", "coil", "input_register", "holding_register"];
+                          const idxA = typeOrder.indexOf(typeA);
+                          const idxB = typeOrder.indexOf(typeB);
+                          const orderA = idxA !== -1 ? idxA : 999;
+                          const orderB = idxB !== -1 ? idxB : 999;
+                          return orderA - orderB;
+                        })
+                        .map(([type, regs]) => {
+                          if (regs.length === 0) return null;
+                          const typeLabels: Record<string, string> = {
+                            discrete_input: "Discrete Inputs (1x)",
+                            coil: "Coils (0x)",
+                            input_register: "Input Registers (3x)",
+                            holding_register: "Holding Registers (4x)",
+                            other: "Other Registers",
+                          };
+                          const label = typeLabels[type] || type;
+                          return (
+                            <optgroup key={type} label={label} className="bg-slate-900 text-slate-400 font-semibold text-[10px]">
+                              {regs.map((reg) => (
+                                <option key={reg.name} value={reg.name} className="bg-slate-950 text-slate-100 text-xs font-normal">
+                                  {reg.name} ({reg.address_dec})
+                                </option>
+                              ))}
+                            </optgroup>
+                          );
+                        })}
+                    </select>
+                    <button
+                      type="button"
+                      onClick={handleAddRegister}
+                      disabled={!selectedRegToAdd}
+                      className="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-200 rounded-lg text-xs font-bold transition-all shrink-0"
+                    >
+                      Add
+                    </button>
+                  </div>
+                ) : (
+                  formSchema && (
+                    <p className="text-[10px] text-slate-550 italic mt-0.5">
+                      {availableSchemaRegisters.length > 0 
+                        ? "All available registers have been added to the whitelist." 
+                        : "Loading registers from schema..."}
+                    </p>
+                  )
+                )}
+              </div>
               <div className="flex items-center gap-2 py-1">
                 <input 
                   type="checkbox" id="formActive"
@@ -500,45 +768,77 @@ export default function App() {
 
           {/* List of configured devices */}
           <div className="flex flex-col gap-2">
-            {devices.map((dev) => (
-              <div 
-                key={dev.name}
-                onClick={() => setSelectedDeviceName(dev.name)}
-                className={`group border rounded-xl p-4 flex items-center justify-between cursor-pointer transition-all ${selectedDeviceName === dev.name ? "bg-amber-500/10 border-amber-500 text-white" : "bg-slate-900/20 border-slate-800 text-slate-300 hover:bg-slate-900/50 hover:border-slate-700"}`}
-              >
-                <div className="flex items-center space-x-3">
-                  <div className={`p-2 rounded-lg ${selectedDeviceName === dev.name ? "bg-amber-500 text-white" : "bg-slate-900 text-slate-400 group-hover:text-slate-200"}`}>
-                    <Cpu className="h-4 w-4" />
+            {devices.map((dev) => {
+              const status = deviceStatuses[dev.name];
+              const isOnline = status?.online === true;
+              const hasPollTime = status?.last_poll !== undefined && status?.last_poll !== null;
+              
+              // Status color helper
+              let statusColor = "bg-slate-600 border-slate-700"; // unknown / inactive / pending
+              if (dev.active) {
+                if (status) {
+                  statusColor = isOnline ? "bg-emerald-500 shadow-emerald-500/50" : "bg-red-500 shadow-red-500/50";
+                }
+              } else {
+                statusColor = "bg-slate-750 border-slate-850 opacity-40";
+              }
+
+              return (
+                <div 
+                  key={dev.name}
+                  onClick={() => setSelectedDeviceName(dev.name)}
+                  className={`group border rounded-xl p-4 flex items-center justify-between cursor-pointer transition-all ${selectedDeviceName === dev.name ? "bg-amber-500/10 border-amber-500 text-white" : "bg-slate-900/20 border-slate-800 text-slate-300 hover:bg-slate-900/50 hover:border-slate-700"}`}
+                >
+                  <div className="flex items-center space-x-3 min-w-0 flex-1">
+                    <div className="relative">
+                      <div className={`p-2 rounded-lg ${selectedDeviceName === dev.name ? "bg-amber-500 text-white" : "bg-slate-900 text-slate-400 group-hover:text-slate-200"}`}>
+                        <Cpu className="h-4 w-4" />
+                      </div>
+                      {/* Status indicator dot */}
+                      <span className={`absolute -bottom-1 -right-1 flex h-3 w-3 rounded-full border-2 border-slate-950 ${statusColor}`} />
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <h3 className="font-semibold text-sm leading-tight truncate">{dev.name}</h3>
+                      <p className="text-xs text-slate-400 truncate">{dev.host}:{dev.port}</p>
+                      {dev.active && (
+                        <p className="text-[10px] text-slate-500 mt-1 leading-none">
+                          {isOnline ? "Online" : status ? "Offline" : "Checking..."}
+                          {hasPollTime && ` • ${getRelativeTime(status.last_poll)}`}
+                        </p>
+                      )}
+                      {!dev.active && (
+                        <p className="text-[10px] text-slate-500 mt-1 leading-none italic">
+                          Inactive
+                        </p>
+                      )}
+                    </div>
                   </div>
-                  <div>
-                    <h3 className="font-semibold text-sm leading-tight">{dev.name}</h3>
-                    <p className="text-xs text-slate-400">{dev.host}:{dev.port}</p>
+                  
+                  <div className="flex items-center space-x-1 opacity-0 group-hover:opacity-100 transition-opacity ml-2 shrink-0">
+                    <button 
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleStartEdit(dev);
+                      }}
+                      className="p-1 rounded hover:bg-slate-800 hover:text-white text-slate-400 transition-all"
+                      title="Edit device"
+                    >
+                      <Edit className="h-4 w-4" />
+                    </button>
+                    <button 
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleDeleteDevice(dev.name);
+                      }}
+                      className="p-1 rounded hover:bg-red-950/50 hover:text-red-400 text-slate-500 transition-all"
+                      title="Remove device"
+                    >
+                      <Trash className="h-4 w-4" />
+                    </button>
                   </div>
                 </div>
-                <div className="flex items-center space-x-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                  <button 
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleStartEdit(dev);
-                    }}
-                    className="p-1 rounded hover:bg-slate-800 hover:text-white text-slate-400 transition-all"
-                    title="Edit device"
-                  >
-                    <Edit className="h-4 w-4" />
-                  </button>
-                  <button 
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleDeleteDevice(dev.name);
-                    }}
-                    className="p-1 rounded hover:bg-red-950/50 hover:text-red-400 text-slate-500 transition-all"
-                    title="Remove device"
-                  >
-                    <Trash className="h-4 w-4" />
-                  </button>
-                </div>
-              </div>
-            ))}
+              );
+            })}
 
             {devices.length === 0 && (
               <div className="text-center py-6 text-slate-500 border border-dashed border-slate-800 rounded-xl">
@@ -555,22 +855,29 @@ export default function App() {
           {schema ? (
             <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 border-b border-slate-900 pb-6">
               <div>
-                <h2 className="text-2xl font-bold tracking-tight text-white">{schema.device_name}</h2>
-                <div className="flex flex-wrap items-center gap-x-4 gap-y-2 mt-1.5 text-xs text-slate-400">
-                  <span className="bg-slate-900 px-2.5 py-1 rounded-md border border-slate-800/80">Schema: {selectedDeviceName} ({schema.version})</span>
+                <h2 className="text-2xl font-bold tracking-tight text-white">{selectedDeviceName}</h2>
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-2 mt-2 text-xs text-slate-400">
+                  <span className="bg-slate-900 px-2.5 py-1 rounded-md border border-slate-800/80">Type: {schema.device_name}</span>
+                  <span className="bg-slate-900 px-2.5 py-1 rounded-md border border-slate-800/80">Schema: {activeDevice?.schema_name || ""} ({schema.version})</span>
                   {schema.firmware && (
-                    <span className="bg-slate-900 px-2.5 py-1 rounded-md border border-slate-800/80">Firmware: {schema.firmware}</span>
+                    <span className="bg-slate-900 px-2.5 py-1 rounded-md border border-slate-800/80">
+                      Firmware: {schema.firmware}
+                      {schema.source_url && ` (${schema.source_url})`}
+                    </span>
                   )}
-                  <span className="flex items-center gap-1.5"><Database className="h-3.5 w-3.5 text-slate-500" /> Host: {devices.find(d=>d.name === selectedDeviceName)?.host}</span>
+                  {activeDevice && (
+                    <>
+                      <span className="bg-slate-900 px-2.5 py-1 rounded-md border border-slate-800/80">Host: {activeDevice.host}</span>
+                      <span className="bg-slate-900 px-2.5 py-1 rounded-md border border-slate-800/80">Port: {activeDevice.port}</span>
+                      <span className="bg-slate-900 px-2.5 py-1 rounded-md border border-slate-800/80">Unit: {activeDevice.unit_id}</span>
+                      <span className="bg-slate-900 px-2.5 py-1 rounded-md border border-slate-800/80">Poll: {activeDevice.polling_interval}s</span>
+                      <span className={`px-2.5 py-1 rounded-md border font-semibold ${activeDevice.active ? "bg-emerald-950/30 text-emerald-400 border-emerald-800/50" : "bg-slate-900/50 text-slate-500 border-slate-800"}`}>
+                        {activeDevice.active ? "Active" : "Inactive"}
+                      </span>
+                    </>
+                  )}
                 </div>
               </div>
-              <button 
-                onClick={() => fetchSchemaAndValues(selectedDeviceName)}
-                className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-800 text-xs font-semibold text-slate-300 transition-colors"
-              >
-                <RefreshCw className={`h-3.5 w-3.5 ${loadingSchema ? "animate-spin" : ""}`} />
-                Reload Schema
-              </button>
             </div>
           ) : (
             <div className="flex-1 flex flex-col items-center justify-center text-center p-12">
@@ -618,8 +925,39 @@ export default function App() {
             </div>
           )}
 
+          {/* Offline alert banner */}
+          {selectedDeviceName && deviceStatuses[selectedDeviceName] && !deviceStatuses[selectedDeviceName].online && (
+            <div className="bg-red-950/40 border border-red-800/60 rounded-xl p-4 flex flex-col md:flex-row items-start md:items-center justify-between gap-4 shadow-lg shadow-red-500/5 animate-in fade-in slide-in-from-top-4 duration-300">
+              <div className="flex items-center space-x-3">
+                <div className="bg-red-500/20 p-2 rounded-lg text-red-400">
+                  <WifiOff className="h-5 w-5 animate-pulse" />
+                </div>
+                <div className="min-w-0">
+                  <h4 className="font-semibold text-sm text-white">Device is Offline / Unreachable</h4>
+                  <p className="text-xs text-red-300/80 mt-0.5">
+                    Failed to connect to Modbus endpoint. Showing last known values.
+                    {deviceStatuses[selectedDeviceName].error && (
+                      <span className="block font-mono text-[10px] text-red-400 mt-1 bg-red-950/80 px-2.5 py-1 rounded border border-red-900/50 break-all select-text">
+                        Error: {deviceStatuses[selectedDeviceName].error}
+                      </span>
+                    )}
+                  </p>
+                </div>
+              </div>
+              {deviceStatuses[selectedDeviceName].last_poll && (
+                <div className="text-xs text-slate-400 bg-slate-900 px-3 py-1.5 rounded-lg border border-slate-800 font-medium shrink-0 self-end md:self-auto">
+                  Last active: {getRelativeTime(deviceStatuses[selectedDeviceName].last_poll)}
+                </div>
+              )}
+            </div>
+          )}
+
           {schema && (
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+            <div className={`grid grid-cols-1 lg:grid-cols-3 gap-8 transition-all duration-300 ${
+              selectedDeviceName && deviceStatuses[selectedDeviceName] && !deviceStatuses[selectedDeviceName].online
+                ? "opacity-50 pointer-events-none select-none"
+                : ""
+            }`}>
               
               {/* Left Column: Read-Only Registers (Discrete Inputs, Input Registers) */}
               <div className="lg:col-span-2 flex flex-col gap-6">

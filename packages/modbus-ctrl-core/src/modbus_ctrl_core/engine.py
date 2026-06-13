@@ -1,7 +1,7 @@
 import json
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from modbus_schema_common.models import (
     ModbusInterfaceSpecification,
@@ -65,11 +65,30 @@ def resolve_schema(schema_name_or_path: str) -> ModbusInterfaceSpecification:
         return ModbusInterfaceSpecification.model_validate_json(f.read())
 
 class ModbusControlEngine:
-    def __init__(self, device: DeviceConfig):
+    def __init__(self, device: DeviceConfig, unsupported_registers: Optional[set[str]] = None):
         self.device = device
         self.schema = resolve_schema(device.schema_name)
         self.client = ModbusClientWrapper(host=device.host, port=device.port)
+        self.unsupported_registers = unsupported_registers or set()
+        self.newly_failed_registers = set()
         
+        # If device specifies a list of allowed registers, filter and sort them
+        if device.registers:
+            self.schema = self.schema.model_copy(deep=True)
+            reg_map = {r.name: r for r in self.schema.registers}
+            filtered_regs = [
+                reg_map[name] for name in device.registers if name in reg_map
+            ]
+            if filtered_regs:
+                self.schema.registers = filtered_regs
+
+        # Filter out registers that are known to be unsupported by this device
+        if self.unsupported_registers:
+            self.schema = self.schema.model_copy(deep=True)
+            self.schema.registers = [
+                r for r in self.schema.registers if r.name not in self.unsupported_registers
+            ]
+
         # Map registers by name and decimal address for fast lookup
         self.registers_by_name: dict[str, ModbusRegisterBase] = {
             r.name: r for r in self.schema.registers
@@ -111,7 +130,8 @@ class ModbusControlEngine:
                     continue
 
                 if res.isError():
-                    logger.error("Modbus error reading block %s[%d:%d]: %s", rtype.value, start, start+count, res)
+                    logger.warning("Modbus error reading block %s[%d:%d]: %s. Falling back to individual reads.", rtype.value, start, start+count, res)
+                    await self._read_individual_registers(block["registers"], rtype, slave, results)
                     continue
 
                 # Unpack each register in the block
@@ -137,9 +157,59 @@ class ModbusControlEngine:
                             results[reg.name] = val
 
             except Exception as e:
-                logger.error("Exception reading block %s[%d:%d]: %s", rtype.value, start, start+count, e)
+                logger.warning("Exception reading block %s[%d:%d]: %s. Falling back to individual reads.", rtype.value, start, start+count, e)
+                try:
+                    await self._read_individual_registers(block["registers"], rtype, slave, results)
+                except Exception as inner_e:
+                    logger.error("Failed individual fallback reads for block: %s", inner_e)
 
         return results
+
+    async def _read_individual_registers(
+        self,
+        registers: list[ModbusRegisterBase],
+        rtype: ModbusRegisterType,
+        slave: int,
+        results: dict[str, Any],
+    ):
+        """Read registers individually as a robust fallback when block read fails."""
+        from pymodbus.pdu import ExceptionResponse
+        for reg in registers:
+            start = reg.address_dec
+            count = reg.register_count
+            try:
+                if rtype == ModbusRegisterType.DISCRETE_INPUT:
+                    res = await self.client.client.read_discrete_inputs(start, count=count, device_id=slave)
+                elif rtype == ModbusRegisterType.COIL:
+                    res = await self.client.client.read_coils(start, count=count, device_id=slave)
+                elif rtype == ModbusRegisterType.INPUT_REGISTER:
+                    res = await self.client.client.read_input_registers(start, count=count, device_id=slave)
+                elif rtype == ModbusRegisterType.HOLDING_REGISTER:
+                    res = await self.client.client.read_holding_registers(start, count=count, device_id=slave)
+                else:
+                    continue
+
+                if res.isError():
+                    logger.debug("Failed individual read for register %s at %d: %s", reg.name, start, res)
+                    if isinstance(res, ExceptionResponse) and res.exception_code in (1, 2):
+                        self.newly_failed_registers.add(reg.name)
+                    continue
+
+                if rtype in (ModbusRegisterType.DISCRETE_INPUT, ModbusRegisterType.COIL):
+                    if len(res.bits) > 0:
+                        results[reg.name] = res.bits[0]
+                else:
+                    if len(res.registers) >= count:
+                        val = translator.unpack_register_value(
+                            res.registers[:count],
+                            reg.data_type,
+                            byte_order="big",
+                            word_order="big",
+                        )
+                        results[reg.name] = val
+
+            except Exception as e:
+                logger.debug("Exception in individual read for register %s at %d: %s", reg.name, start, e)
 
     async def write_registers(self, writes: dict[str, Any]) -> dict[str, str]:
         """

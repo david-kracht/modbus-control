@@ -9,6 +9,7 @@ from typing import List, Optional
 
 import typer
 import yaml
+from pydantic import ValidationError
 from rich.console import Console
 from rich.table import Table
 
@@ -22,6 +23,13 @@ console_output = Console()
 def get_devices_yaml_path() -> Path:
     path_str = os.getenv("MODBUS_DEVICES_YAML", "devices.yaml")
     return Path(path_str).resolve()
+
+def load_app_config(config_path: Path) -> AppConfig:
+    try:
+        return AppConfig.load_from_yaml(config_path)
+    except ValueError as e:
+        console_output.print(f"[red]{e}[/red]")
+        raise typer.Exit(code=1)
 
 def resolve_device(
     target: Optional[str] = None,
@@ -40,7 +48,7 @@ def resolve_device(
         )
 
     config_path = get_devices_yaml_path()
-    app_config = AppConfig.load_from_yaml(config_path)
+    app_config = load_app_config(config_path)
 
     if not app_config.devices:
         raise typer.BadParameter("No devices configured in devices.yaml, and no --host override provided.")
@@ -92,10 +100,11 @@ def device_add(
     schema: Optional[str] = typer.Option(None, help="Schema register template"),
     interval: Optional[float] = typer.Option(None, help="Polling interval in seconds"),
     active: Optional[bool] = typer.Option(None, "--active/--no-active", help="Whether the device is active"),
+    registers: Optional[str] = typer.Option(None, "--registers", help="Comma-separated list of register names to whitelist"),
 ):
     """Add a new device to the local devices.yaml configuration."""
     config_path = get_devices_yaml_path()
-    app_config = AppConfig.load_from_yaml(config_path)
+    app_config = load_app_config(config_path)
 
     # Build kwargs to only pass parameters that were explicitly specified
     kwargs = {"host": host}
@@ -111,9 +120,22 @@ def device_add(
         kwargs["polling_interval"] = interval
     if active is not None:
         kwargs["active"] = active
+    if registers is not None:
+        if registers.strip() == "":
+            kwargs["registers"] = None
+        else:
+            kwargs["registers"] = [r.strip() for r in registers.split(",") if r.strip()]
 
     try:
         new_device = DeviceConfig(**kwargs)
+    except ValidationError as e:
+        console_output.print("[red]Validation Error:[/red]")
+        for error in e.errors():
+            msg = error["msg"]
+            if msg.startswith("Value error, "):
+                msg = msg[len("Value error, "):]
+            console_output.print(f"  [red]- {msg}[/red]")
+        raise typer.Exit(code=1)
     except Exception as e:
         console_output.print(f"[red]Validation Error: {e}[/red]")
         raise typer.Exit(code=1)
@@ -138,10 +160,13 @@ def device_edit(
     schema: Optional[str] = typer.Option(None, "--schema", help="New schema register template"),
     interval: Optional[float] = typer.Option(None, "--interval", help="New polling interval in seconds"),
     active: Optional[bool] = typer.Option(None, "--active/--no-active", help="Enable or disable polling for the device"),
+    registers: Optional[str] = typer.Option(None, "--registers", help="Comma-separated list of registers to overwrite the whitelist (use empty string to clear)"),
+    add_register: Optional[List[str]] = typer.Option(None, "--add-register", help="Register name(s) to add to the whitelist (can be specified multiple times or as comma-separated list)"),
+    remove_register: Optional[List[str]] = typer.Option(None, "--remove-register", help="Register name(s) to remove from the whitelist (can be specified multiple times or as comma-separated list)"),
 ):
     """Edit an existing device in the local devices.yaml configuration."""
     config_path = get_devices_yaml_path()
-    app_config = AppConfig.load_from_yaml(config_path)
+    app_config = load_app_config(config_path)
 
     idx_to_edit = None
     try:
@@ -180,8 +205,70 @@ def device_edit(
     if active is not None:
         current_data["active"] = active
 
+    # Handle registers whitelist options
+    if registers is not None:
+        if registers.strip() == "":
+            current_regs = None
+        else:
+            current_regs = [r.strip() for r in registers.split(",") if r.strip()]
+    else:
+        current_regs = current_data.get("registers")
+
+    # Parse add/remove list options (handle both multiple calls and comma-separated string)
+    add_list = []
+    if add_register:
+        for val in add_register:
+            for part in val.split(","):
+                part_stripped = part.strip()
+                if part_stripped:
+                    add_list.append(part_stripped)
+
+    remove_list = []
+    if remove_register:
+        for val in remove_register:
+            for part in val.split(","):
+                part_stripped = part.strip()
+                if part_stripped:
+                    remove_list.append(part_stripped)
+
+    # Apply add/remove changes
+    if add_list or remove_list:
+        if current_regs is None:
+            if add_list:
+                current_regs = list(add_list)
+            if remove_list:
+                try:
+                    schema_to_use = current_data.get("schema_name") or "v10"
+                    spec = resolve_schema(schema_to_use)
+                    all_regs = [r.name for r in spec.registers]
+                    current_regs = [r for r in all_regs if r not in remove_list]
+                except Exception as e:
+                    console_output.print(f"[red]Error: Cannot remove registers from empty whitelist (all active) because schema could not be loaded: {e}[/red]")
+                    raise typer.Exit(code=1)
+        else:
+            new_regs = list(current_regs)
+            for r in add_list:
+                if r not in new_regs:
+                    new_regs.append(r)
+            for r in remove_list:
+                if r in new_regs:
+                    new_regs.remove(r)
+            current_regs = new_regs
+
+    # Save it back if any changes occurred
+    if registers is not None or add_list or remove_list:
+        current_data["registers"] = current_regs
+
     try:
         updated_device = DeviceConfig(**current_data)
+    except ValidationError as e:
+        console_output.print("[red]Validation Error:[/red]")
+        for error in e.errors():
+            msg = error["msg"]
+            if msg.startswith("Value error, "):
+                msg = msg[len("Value error, "):]
+            console_output.print(f"  [red]- {msg}[/red]")
+        raise typer.Exit(code=1)
     except Exception as e:
         console_output.print(f"[red]Validation Error: {e}[/red]")
         raise typer.Exit(code=1)
@@ -200,7 +287,7 @@ def device_edit(
 def device_list():
     """List all configured Modbus devices."""
     config_path = get_devices_yaml_path()
-    app_config = AppConfig.load_from_yaml(config_path)
+    app_config = load_app_config(config_path)
 
     if not app_config.devices:
         console_output.print(f"[yellow]No devices configured in {config_path}.[/yellow]")
@@ -214,8 +301,10 @@ def device_list():
     table.add_column("Schema", style="blue")
     table.add_column("Interval", justify="right")
     table.add_column("Active", justify="center")
+    table.add_column("Registers", style="yellow")
 
     for idx, dev in enumerate(app_config.devices):
+        registers_str = ", ".join(dev.registers) if dev.registers else "All"
         table.add_row(
             str(idx),
             dev.name,
@@ -223,7 +312,8 @@ def device_list():
             str(dev.unit_id),
             dev.schema_name,
             f"{dev.polling_interval}s",
-            "[green]Yes[/green]" if dev.active else "[red]No[/red]"
+            "[green]Yes[/green]" if dev.active else "[red]No[/red]",
+            registers_str
         )
     console_output.print(table)
 
@@ -233,7 +323,7 @@ def device_remove(
 ):
     """Remove a device from the local devices.yaml configuration."""
     config_path = get_devices_yaml_path()
-    app_config = AppConfig.load_from_yaml(config_path)
+    app_config = load_app_config(config_path)
 
     found = None
     # Try by index first
@@ -280,8 +370,12 @@ def list_registers(
         console_output.print(f"[red]Error resolving schema: {e}[/red]")
         raise typer.Exit(code=1)
 
-    # Filter registers if search term is provided
-    regs = spec.registers
+    # Filter and sort by allowed registers if specified in config
+    if device.registers:
+        reg_map = {r.name: r for r in spec.registers}
+        regs = [reg_map[name] for name in device.registers if name in reg_map]
+    else:
+        regs = spec.registers
     if search:
         search_lower = search.lower()
         regs = [
@@ -441,8 +535,11 @@ def read_registers(
 
     # Format values based on enum_mode
     formatted_results = {}
-    for name, val in raw_results.items():
-        reg = engine.registers_by_name[name]
+    for reg in target_regs:
+        name = reg.name
+        val = raw_results.get(name)
+        if val is None:
+            continue
         # Enum mapping: enum_values keys are int (dict[int, str])
         if enum_mode == "literal" and reg.enum_values and val is not None:
             try:
