@@ -6,7 +6,9 @@ import json
 import os
 import re
 from pathlib import Path
+import time
 from typing import List, Optional
+from zoneinfo import ZoneInfo
 
 import typer
 import yaml
@@ -545,10 +547,12 @@ def read_registers(
     port: Optional[int] = typer.Option(None, help="Ad-hoc port override"),
     unit_id: Optional[int] = typer.Option(None, help="Ad-hoc Slave Unit ID override"),
     schema: Optional[str] = typer.Option(None, help="Ad-hoc schema override"),
-    format: str = typer.Option("csv", help="Output format: console, json, yaml, csv, ini"),
+    format: str = typer.Option("csv", help="Output format: console, json, yaml, csv, ini, markdown, influx, prometheus, jsonl"),
     enum_mode: str = typer.Option("ordinal", help="Enum formatting: literal (string), ordinal (number)"),
     show_time: bool = typer.Option(True, "--time/--no-time", help="Include timestamp in the output"),
     time_format: str = typer.Option("%Y-%m-%d %H:%M:%S.%f", "--time-format", help="Timestamp format string"),
+    timezone: str = typer.Option("UTC", "--timezone", help="Timezone for the timestamp (e.g. UTC, local, Europe/Berlin)"),
+    interval: Optional[float] = typer.Option(None, "--interval", help="Continuously read registers every N seconds"),
     delimiter: str = typer.Option(";", "--delimiter", help="CSV field delimiter", rich_help_panel="CSV Options"),
     vertical: bool = typer.Option(False, "--vertical/--horizontal", help="Output layout orientation", rich_help_panel="CSV Options"),
     header: bool = typer.Option(False, "--header/--no-header", help="Include headers in output", rich_help_panel="CSV Options"),
@@ -556,14 +560,32 @@ def read_registers(
     newline: str = typer.Option("/r/n", "--newline", help="Line ending style for the output file: /r/n or /n"),
 ):
     """Read register values from a Modbus device."""
-    if format != "csv":
-        for opt_name in ["delimiter", "vertical", "header"]:
+    if format not in ("csv", "markdown"):
+        for opt_name in ["vertical", "header"]:
             source = ctx.get_parameter_source(opt_name)
             if source is not None and source.name == "COMMANDLINE":
                 raise typer.BadParameter(
-                    f"Option --{opt_name} is only available when --format is csv.",
+                    f"Option --{opt_name} is only available when --format is csv or markdown.",
                     param_hint=f"--{opt_name}"
                 )
+    if format != "csv":
+        source = ctx.get_parameter_source("delimiter")
+        if source is not None and source.name == "COMMANDLINE":
+            raise typer.BadParameter(
+                "Option --delimiter is only available when --format is csv.",
+                param_hint="--delimiter"
+            )
+
+    try:
+        if timezone.lower() == "local":
+            tz = None
+        else:
+            tz = ZoneInfo(timezone)
+    except Exception:
+        raise typer.BadParameter(
+            f"Invalid timezone: {timezone}",
+            param_hint="--timezone"
+        )
 
     try:
         device = resolve_device(target, host, port, unit_id, schema)
@@ -611,159 +633,259 @@ def read_registers(
             return await engine.read_all()
         finally:
             engine.schema.registers = original_regs
-
-    try:
-        raw_results = asyncio.run(perform_read())
-    except Exception as e:
-        console_output.print(f"[red]Error executing Modbus read: {e}[/red]")
-        raise typer.Exit(code=1)
-
-    # Format values based on enum_mode
-    formatted_results = {}
-    for reg in target_regs:
-        name = reg.name
-        val = raw_results.get(name)
-        if val is None:
-            continue
-        # Enum mapping: enum_values keys are int (dict[int, str])
-        if enum_mode == "literal" and reg.enum_values and val is not None:
             try:
-                int_val = int(val)
-                formatted_results[name] = reg.enum_values.get(int_val, val)
-            except (TypeError, ValueError):
-                formatted_results[name] = val
-        else:
-            formatted_results[name] = val
+                await engine.client.close()
+            except Exception:
+                pass
+            engine.client.client = None
 
-    now_str = None
-    if show_time:
-        now_str = datetime.now().strftime(time_format)
+    first_write = True
+    try:
+        while True:
+            try:
+                raw_results = asyncio.run(perform_read())
+            except Exception as e:
+                console_output.print(f"[red]Error executing Modbus read: {e}[/red]")
+                raise typer.Exit(code=1)
 
-    # Render output formats
-    content = ""
+            # Format values based on enum_mode
+            formatted_results = {}
+            for reg in target_regs:
+                name = reg.name
+                val = raw_results.get(name)
+                if val is None:
+                    continue
+                # Enum mapping: enum_values keys are int (dict[int, str])
+                if enum_mode == "literal" and reg.enum_values and val is not None:
+                    try:
+                        int_val = int(val)
+                        formatted_results[name] = reg.enum_values.get(int_val, val)
+                    except (TypeError, ValueError):
+                        formatted_results[name] = val
+                else:
+                    formatted_results[name] = val
 
-    if format == "json":
-        output_dict = {}
-        if show_time:
-            output_dict["Time"] = now_str
-        output_dict.update(formatted_results)
-        content = json.dumps(output_dict, indent=2)
+            now_str = None
+            if show_time:
+                now_str = datetime.now(tz).strftime(time_format)
 
-    elif format == "yaml":
-        class QuotedString(str):
-            pass
+            # Render output formats
+            content = ""
 
-        class CustomDumper(yaml.SafeDumper):
-            pass
+            if format == "json":
+                output_dict = {}
+                if show_time:
+                    output_dict["Time"] = now_str
+                output_dict.update(formatted_results)
+                content = json.dumps(output_dict, indent=2)
 
-        CustomDumper.add_representer(QuotedString, lambda d, data: d.represent_scalar('tag:yaml.org,2002:str', data, style='"'))
+            elif format == "jsonl":
+                output_dict = {}
+                if show_time:
+                    output_dict["Time"] = now_str
+                output_dict.update(formatted_results)
+                content = json.dumps(output_dict)
 
-        yaml_results = {}
-        if show_time:
-            yaml_results["Time"] = QuotedString(now_str)
-        for k, v in formatted_results.items():
-            if isinstance(v, str):
-                yaml_results[k] = QuotedString(v)
+            elif format == "yaml":
+                class QuotedString(str):
+                    pass
+
+                class CustomDumper(yaml.SafeDumper):
+                    pass
+
+                CustomDumper.add_representer(QuotedString, lambda d, data: d.represent_scalar('tag:yaml.org,2002:str', data, style='"'))
+
+                yaml_results = {}
+                if show_time:
+                    yaml_results["Time"] = QuotedString(now_str)
+                for k, v in formatted_results.items():
+                    if isinstance(v, str):
+                        yaml_results[k] = QuotedString(v)
+                    else:
+                        yaml_results[k] = v
+                content = yaml.dump(yaml_results, Dumper=CustomDumper, sort_keys=False)
+
+            elif format == "csv":
+                def format_csv_cell(key: str, val) -> str:
+                    if isinstance(val, bool):
+                        return str(val)
+                    if isinstance(val, (int, float)):
+                        return str(val)
+                    if key == "Time":
+                        return str(val)
+                    if isinstance(val, str):
+                        escaped = val.replace('"', '""')
+                        return f'"{escaped}"'
+                    return str(val)
+
+                fields = []
+                if show_time:
+                    fields.append(("Time", now_str))
+                for k, v in formatted_results.items():
+                    fields.append((k, v))
+
+                if vertical:
+                    csv_lines = []
+                    if header:
+                        csv_lines.append(f"Register{delimiter}Value")
+                    for k, v in fields:
+                        csv_lines.append(f"{k}{delimiter}{format_csv_cell(k, v)}")
+                    content = "\n".join(csv_lines)
+                else:
+                    csv_lines = []
+                    if header:
+                        csv_lines.append(delimiter.join([f[0] for f in fields]))
+                    csv_lines.append(delimiter.join([format_csv_cell(f[0], f[1]) for f in fields]))
+                    content = "\n".join(csv_lines)
+
+            elif format == "ini":
+                def format_ini_value(v) -> str:
+                    if isinstance(v, bool):
+                        return str(v)
+                    if isinstance(v, (int, float)):
+                        return str(v)
+                    if isinstance(v, str):
+                        escaped = v.replace('"', '\\"')
+                        return f'"{escaped}"'
+                    return str(v)
+
+                ini_lines = []
+                if show_time:
+                    ini_lines.append(f"Time={format_ini_value(now_str)}")
+                for k, v in formatted_results.items():
+                    ini_lines.append(f"{k}={format_ini_value(v)}")
+                content = "\n".join(ini_lines)
+
+            elif format == "markdown":
+                def format_markdown_cell(key: str, val) -> str:
+                    if isinstance(val, bool):
+                        return str(val)
+                    if isinstance(val, (int, float)):
+                        return str(val)
+                    if key == "Time":
+                        return str(val)
+                    if isinstance(val, str):
+                        escaped = val.replace('|', '\\|').replace('"', '""')
+                        return f'"{escaped}"'
+                    return str(val)
+
+                fields = []
+                if show_time:
+                    fields.append(("Time", now_str))
+                for k, v in formatted_results.items():
+                    fields.append((k, v))
+
+                if vertical:
+                    md_lines = []
+                    if header:
+                        md_lines.append("| Register | Value |")
+                        md_lines.append("| --- | --- |")
+                    for k, v in fields:
+                        md_lines.append(f"| {k} | {format_markdown_cell(k, v)} |")
+                    content = "\n".join(md_lines)
+                else:
+                    md_lines = []
+                    if header:
+                        md_lines.append("| " + " | ".join([f[0] for f in fields]) + " |")
+                        md_lines.append("| " + " | ".join(["---"] * len(fields)) + " |")
+                    md_lines.append("| " + " | ".join([format_markdown_cell(f[0], f[1]) for f in fields]) + " |")
+                    content = "\n".join(md_lines)
+
+            elif format == "influx":
+                def format_influx_field(val) -> str:
+                    if isinstance(val, bool):
+                        return "true" if val else "false"
+                    if isinstance(val, int):
+                        return f"{val}i"
+                    if isinstance(val, float):
+                        return str(val)
+                    if isinstance(val, str):
+                        escaped = val.replace('"', '\\"')
+                        return f'"{escaped}"'
+                    return f'"{val}"'
+
+                fields_str = []
+                for k, v in formatted_results.items():
+                    fields_str.append(f"{k}={format_influx_field(v)}")
+
+                device_tag = f",device={device.name}" if getattr(device, "name", None) else ""
+                fields_part = ",".join(fields_str)
+                
+                if show_time:
+                    ns_timestamp = int(time.time_ns())
+                    content = f"modbus{device_tag} {fields_part} {ns_timestamp}"
+                else:
+                    content = f"modbus{device_tag} {fields_part}"
+
+            elif format == "prometheus":
+                prom_lines = []
+                ms_timestamp = f" {int(time.time() * 1000)}" if show_time else ""
+                device_lbl = f'device="{device.name}"' if getattr(device, "name", None) else ""
+                
+                for k, v in formatted_results.items():
+                    metric_name = re.sub(r'[^a-zA-Z0-9_]', '_', k)
+                    if isinstance(v, bool):
+                        val_str = "1" if v else "0"
+                        labels_str = f"{{{device_lbl}}}" if device_lbl else ""
+                    elif isinstance(v, (int, float)):
+                        val_str = str(v)
+                        labels_str = f"{{{device_lbl}}}" if device_lbl else ""
+                    else:
+                        val_str = "1"
+                        escaped_val = str(v).replace('"', '\\"')
+                        if device_lbl:
+                            labels_str = f'{{{device_lbl},value="{escaped_val}"}}'
+                        else:
+                            labels_str = f'{{value="{escaped_val}"}}'
+                    prom_lines.append(f"{metric_name}{labels_str} {val_str}{ms_timestamp}")
+                content = "\n".join(prom_lines)
+
             else:
-                yaml_results[k] = v
-        content = yaml.dump(yaml_results, Dumper=CustomDumper, sort_keys=False)
+                # Default format: console
+                console_lines = []
+                if show_time:
+                    console_lines.append(f"{'Time':<35}: {now_str}")
+                for name in [r.name for r in target_regs]:
+                    val = formatted_results.get(name)
+                    if val is None:
+                        if file is None:
+                            console_lines.append(f"{name:<35}: [red]Error / Offline[/red]")
+                        else:
+                            console_lines.append(f"{name:<35}: Error / Offline")
+                        continue
+                    reg = engine.registers_by_name[name]
+                    unit = getattr(reg, "unit", "") or ""
+                    unit_str = f" {unit}" if unit else ""
+                    console_lines.append(f"{name:<35}: {val}{unit_str}")
+                content = "\n".join(console_lines)
 
-    elif format == "csv":
-        def format_csv_cell(key: str, val) -> str:
-            if isinstance(val, bool):
-                return str(val)
-            if isinstance(val, (int, float)):
-                return str(val)
-            if key == "Time":
-                return str(val)
-            if isinstance(val, str):
-                escaped = val.replace('"', '""')
-                return f'"{escaped}"'
-            return str(val)
+            if file is not None:
+                content = content.rstrip("\r\n")
+                content = content.replace("\r\n", "\n").replace("\r", "\n")
+                lines = content.split("\n")
+                eol = parse_newline(newline)
+                file_content = eol.join(lines) + eol
 
-        fields = []
-        if show_time:
-            fields.append(("Time", now_str))
-        for k, v in formatted_results.items():
-            fields.append((k, v))
+                try:
+                    file.parent.mkdir(parents=True, exist_ok=True)
+                    mode = "w" if first_write else "a"
+                    with open(file, mode, encoding="utf-8", newline="") as f:
+                        f.write(file_content)
+                    first_write = False
+                except Exception as e:
+                    console_output.print(f"[red]Error writing to file: {e}[/red]")
+                    raise typer.Exit(code=1)
+            else:
+                if format == "console":
+                    console_output.print(content)
+                else:
+                    print(content)
 
-        if vertical:
-            csv_lines = []
-            if header:
-                csv_lines.append(f"Register{delimiter}Value")
-            for k, v in fields:
-                csv_lines.append(f"{k}{delimiter}{format_csv_cell(k, v)}")
-            content = "\n".join(csv_lines)
-        else:
-            csv_lines = []
-            if header:
-                csv_lines.append(delimiter.join([f[0] for f in fields]))
-            csv_lines.append(delimiter.join([format_csv_cell(f[0], f[1]) for f in fields]))
-            content = "\n".join(csv_lines)
-
-    elif format == "ini":
-        def format_ini_value(v) -> str:
-            if isinstance(v, bool):
-                return str(v)
-            if isinstance(v, (int, float)):
-                return str(v)
-            if isinstance(v, str):
-                escaped = v.replace('"', '\\"')
-                return f'"{escaped}"'
-            return str(v)
-
-        ini_lines = []
-        if show_time:
-            ini_lines.append(f"Time={format_ini_value(now_str)}")
-        for k, v in formatted_results.items():
-            ini_lines.append(f"{k}={format_ini_value(v)}")
-        content = "\n".join(ini_lines)
-
-    else:
-        # Default format: console
-        if file is None:
-            if show_time:
-                console_output.print(f"{'Time':<35}: {now_str}")
-            for name in [r.name for r in target_regs]:
-                val = formatted_results.get(name)
-                if val is None:
-                    console_output.print(f"{name:<35}: [red]Error / Offline[/red]")
-                    continue
-                reg = engine.registers_by_name[name]
-                unit = getattr(reg, "unit", "") or ""
-                unit_str = f" {unit}" if unit else ""
-                console_output.print(f"{name:<35}: {val}{unit_str}")
-            return
-        else:
-            console_lines = []
-            if show_time:
-                console_lines.append(f"{'Time':<35}: {now_str}")
-            for name in [r.name for r in target_regs]:
-                val = formatted_results.get(name)
-                if val is None:
-                    console_lines.append(f"{name:<35}: Error / Offline")
-                    continue
-                reg = engine.registers_by_name[name]
-                unit = getattr(reg, "unit", "") or ""
-                unit_str = f" {unit}" if unit else ""
-                console_lines.append(f"{name:<35}: {val}{unit_str}")
-            content = "\n".join(console_lines)
-
-    if file is not None:
-        content = content.rstrip("\r\n")
-        content = content.replace("\r\n", "\n").replace("\r", "\n")
-        lines = content.split("\n")
-        eol = parse_newline(newline)
-        file_content = eol.join(lines) + eol
-
-        try:
-            file.parent.mkdir(parents=True, exist_ok=True)
-            file.write_text(file_content, encoding="utf-8", newline="")
-        except Exception as e:
-            console_output.print(f"[red]Error writing to file: {e}[/red]")
-            raise typer.Exit(code=1)
-    else:
-        print(content)
+            if interval is None:
+                break
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        pass
 
 # ---------------------------------------------------------------------------
 # Write Command
