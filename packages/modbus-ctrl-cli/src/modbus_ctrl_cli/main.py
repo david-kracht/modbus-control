@@ -5,6 +5,10 @@ import io
 import json
 import os
 import re
+import sys
+import select
+import tty
+import termios
 from pathlib import Path
 import time
 from typing import List, Optional
@@ -15,6 +19,12 @@ import yaml
 from pydantic import ValidationError
 from rich.console import Console
 from rich.table import Table
+from rich.live import Live
+from rich.layout import Layout
+from rich.panel import Panel
+from rich.text import Text
+from rich.align import Align
+from rich import box
 
 from modbus_ctrl_contracts import AppConfig, DeviceConfig
 from modbus_ctrl_core import ModbusControlEngine, resolve_schema, config
@@ -951,6 +961,30 @@ def write_registers(
     else:
         console_output.print(f"[red]Failed: {resolved_name} - {status}[/red]")
         raise typer.Exit(code=1)
+
+@app.command("dashboard")
+def run_tui_dashboard(
+    target: Optional[str] = typer.Option(None, "--target", "-t", help="YAML device index or name"),
+    host: Optional[str] = typer.Option(None, "--host", "-h", help="Ad-hoc Modbus IP override"),
+    port: Optional[int] = typer.Option(None, help="Ad-hoc port override"),
+    unit_id: Optional[int] = typer.Option(None, help="Ad-hoc Slave Unit ID override"),
+    schema: Optional[str] = typer.Option(None, help="Ad-hoc schema override"),
+    interval: float = typer.Option(1.0, "--interval", help="Refresh interval in seconds"),
+    timezone: str = typer.Option("UTC", "--timezone", help="Timezone for the timestamp (e.g. UTC, local, Europe/Berlin)"),
+    time_format: str = typer.Option("%Y-%m-%d %H:%M:%S", "--time-format", help="Timestamp format string"),
+):
+    """Monitor register values in real-time with an interactive TUI dashboard."""
+    from .dashboard import run_tui_dashboard_impl
+    run_tui_dashboard_impl(
+        target=target,
+        host=host,
+        port=port,
+        unit_id=unit_id,
+        schema=schema,
+        interval=interval,
+        timezone=timezone,
+        time_format=time_format,
+    )
 
 if __name__ == "__main__":
     app()
