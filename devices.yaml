@@ -1,5 +1,7 @@
 devices:
 - name: SimDevice
   host: 127.0.0.1
-  port: 5020
+  port: 5025
   schema_name: v10
+  registers:
+  - LogSystemOffOk

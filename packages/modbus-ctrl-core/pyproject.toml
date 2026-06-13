@@ -5,10 +5,14 @@ description = "Core async library for Modbus Control Suite"
 requires-python = ">=3.11"
 dependencies = [
     "pymodbus>=3.8.0",
-    "modbus-ctrl-contracts",
+    "modbus-ctrl-contracts>=0.1.0",
+    "python-dotenv>=1.0.1",
 ]
 
 [tool.uv.sources]
+# === REGISTRY SWITCH ===
+# Development: Sibling packages resolve locally from the workspace paths.
+# Production Release: Comment out the lines in [tool.uv.sources] below to resolve published versions from PyPI registry.
 modbus-ctrl-contracts = { workspace = true }
 
 [build-system]

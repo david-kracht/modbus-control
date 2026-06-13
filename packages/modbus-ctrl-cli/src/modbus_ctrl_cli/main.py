@@ -14,15 +14,33 @@ from rich.console import Console
 from rich.table import Table
 
 from modbus_ctrl_contracts import AppConfig, DeviceConfig
-from modbus_ctrl_core import ModbusControlEngine, resolve_schema
+from modbus_ctrl_core import ModbusControlEngine, resolve_schema, config
 from modbus_schema_common.models import ModbusRegisterType, ModbusDataType
 
 app = typer.Typer(help="Modbus Control Suite CLI")
 console_output = Console()
 
+@app.callback()
+def main_callback(
+    devices_yaml: Optional[Path] = typer.Option(None, "--devices-yaml", "-d", envvar="MODBUS_DEVICES_YAML", help="Path to devices.yaml configuration file"),
+    default_host: Optional[str] = typer.Option(None, "--default-host", envvar="DEFAULT_MODBUS_HOST", help="Default Ad-Hoc Modbus host override"),
+    default_port: Optional[int] = typer.Option(None, "--default-port", envvar="DEFAULT_MODBUS_PORT", help="Default Ad-Hoc Modbus port override"),
+    default_unit_id: Optional[int] = typer.Option(None, "--default-unit-id", envvar="DEFAULT_MODBUS_UNIT_ID", help="Default Ad-Hoc slave unit ID override"),
+    default_schema: Optional[str] = typer.Option(None, "--default-schema", envvar="DEFAULT_MODBUS_SCHEMA", help="Default Ad-Hoc schema override"),
+):
+    if devices_yaml is not None:
+        config.MODBUS_DEVICES_YAML = devices_yaml.resolve()
+    if default_host is not None:
+        config.DEFAULT_MODBUS_HOST = default_host
+    if default_port is not None:
+        config.DEFAULT_MODBUS_PORT = default_port
+    if default_unit_id is not None:
+        config.DEFAULT_MODBUS_UNIT_ID = default_unit_id
+    if default_schema is not None:
+        config.DEFAULT_MODBUS_SCHEMA = default_schema
+
 def get_devices_yaml_path() -> Path:
-    path_str = os.getenv("MODBUS_DEVICES_YAML", "devices.yaml")
-    return Path(path_str).resolve()
+    return config.MODBUS_DEVICES_YAML
 
 def load_app_config(config_path: Path) -> AppConfig:
     try:
@@ -34,42 +52,82 @@ def load_app_config(config_path: Path) -> AppConfig:
 def resolve_device(
     target: Optional[str] = None,
     host: Optional[str] = None,
-    port: int = 502,
-    unit_id: int = 1,
-    schema_name: str = "v10",
+    port: Optional[int] = None,
+    unit_id: Optional[int] = None,
+    schema_name: Optional[str] = None,
 ) -> DeviceConfig:
+    # If a specific host is provided, that is an ad-hoc device connection
     if host:
+        p = port if port is not None else config.DEFAULT_MODBUS_PORT
+        u = unit_id if unit_id is not None else config.DEFAULT_MODBUS_UNIT_ID
+        s = schema_name if schema_name is not None else config.DEFAULT_MODBUS_SCHEMA
         return DeviceConfig(
             name=f"AdHoc_{host}",
             host=host,
-            port=port,
-            unit_id=unit_id,
-            schema_name=schema_name,
+            port=p,
+            unit_id=u,
+            schema_name=s,
         )
 
     config_path = get_devices_yaml_path()
-    app_config = load_app_config(config_path)
+    app_config = None
+    if config_path.exists():
+        try:
+            app_config = load_app_config(config_path)
+        except Exception:
+            pass
 
-    if not app_config.devices:
-        raise typer.BadParameter("No devices configured in devices.yaml, and no --host override provided.")
+    selected_dev = None
 
     if target is not None:
+        if not app_config or not app_config.devices:
+            raise typer.BadParameter(f"Target device '{target}' requested, but devices.yaml is empty or could not be loaded.")
         # Check by list index
         try:
             idx = int(target)
             if 0 <= idx < len(app_config.devices):
-                return app_config.devices[idx]
+                selected_dev = app_config.devices[idx]
         except ValueError:
             pass
 
-        # Check by name
-        for dev in app_config.devices:
-            if dev.name == target:
-                return dev
-        raise typer.BadParameter(f"Target device '{target}' not found by index or name in devices.yaml.")
+        if selected_dev is None:
+            # Check by name
+            for dev in app_config.devices:
+                if dev.name == target:
+                    selected_dev = dev
+                    break
+        
+        if selected_dev is None:
+            raise typer.BadParameter(f"Target device '{target}' not found by index or name in devices.yaml.")
+    else:
+        # Default to first device in config if available
+        if app_config and app_config.devices:
+            selected_dev = app_config.devices[0]
 
-    # Default to first device
-    return app_config.devices[0]
+    if selected_dev is not None:
+        # Apply CLI overrides if explicitly provided (i.e. not None)
+        updated_data = selected_dev.model_dump()
+        if host is not None:
+            updated_data["host"] = host
+        if port is not None:
+            updated_data["port"] = port
+        if unit_id is not None:
+            updated_data["unit_id"] = unit_id
+        if schema_name is not None:
+            updated_data["schema_name"] = schema_name
+        return DeviceConfig(**updated_data)
+
+    # Fallback to configured default Modbus host if set in environment
+    if config.DEFAULT_MODBUS_HOST:
+        return DeviceConfig(
+            name=f"AdHoc_{config.DEFAULT_MODBUS_HOST}",
+            host=config.DEFAULT_MODBUS_HOST,
+            port=port if port is not None else config.DEFAULT_MODBUS_PORT,
+            unit_id=unit_id if unit_id is not None else config.DEFAULT_MODBUS_UNIT_ID,
+            schema_name=schema_name if schema_name is not None else config.DEFAULT_MODBUS_SCHEMA,
+        )
+
+    raise typer.BadParameter("No devices configured in devices.yaml, and no DEFAULT_MODBUS_HOST environment fallback set.")
 
 def extract_pascal_case_words(text: str) -> List[str]:
     return re.findall(r'\b[A-Z][a-zA-Z0-9]*\b', text)
@@ -357,9 +415,9 @@ def list_registers(
     search: Optional[str] = typer.Argument(None, help="Optional search filter substring"),
     target: Optional[str] = typer.Option(None, "--target", "-t", help="YAML device index or name"),
     host: Optional[str] = typer.Option(None, "--host", "-h", help="Ad-hoc Modbus IP override"),
-    port: int = typer.Option(502, help="Ad-hoc port override"),
-    unit_id: int = typer.Option(1, help="Ad-hoc Slave Unit ID override"),
-    schema: str = typer.Option("v10", help="Ad-hoc schema override"),
+    port: Optional[int] = typer.Option(None, help="Ad-hoc port override"),
+    unit_id: Optional[int] = typer.Option(None, help="Ad-hoc Slave Unit ID override"),
+    schema: Optional[str] = typer.Option(None, help="Ad-hoc schema override"),
     view: str = typer.Option("table", help="View format: table, grouped, csv, ini, json, yaml"),
 ):
     """List metadata descriptions of Modbus registers in the device schema."""
@@ -473,9 +531,9 @@ def read_registers(
     queries: List[str] = typer.Argument(None, help="Register names, addresses, or free text"),
     target: Optional[str] = typer.Option(None, "--target", "-t", help="YAML device index or name"),
     host: Optional[str] = typer.Option(None, "--host", "-h", help="Ad-hoc Modbus IP override"),
-    port: int = typer.Option(502, help="Ad-hoc port override"),
-    unit_id: int = typer.Option(1, help="Ad-hoc Slave Unit ID override"),
-    schema: str = typer.Option("v10", help="Ad-hoc schema override"),
+    port: Optional[int] = typer.Option(None, help="Ad-hoc port override"),
+    unit_id: Optional[int] = typer.Option(None, help="Ad-hoc Slave Unit ID override"),
+    schema: Optional[str] = typer.Option(None, help="Ad-hoc schema override"),
     format: str = typer.Option("console", help="Output format: console, json, yaml, csv, ini"),
     enum_mode: str = typer.Option("literal", help="Enum formatting: literal (string), ordinal (number)"),
 ):
@@ -594,9 +652,9 @@ def write_registers(
     value: str = typer.Argument(..., help="Ordinal numeric value to write"),
     target: Optional[str] = typer.Option(None, "--target", "-t", help="YAML device index or name"),
     host: Optional[str] = typer.Option(None, "--host", "-h", help="Ad-hoc Modbus IP override"),
-    port: int = typer.Option(502, help="Ad-hoc port override"),
-    unit_id: int = typer.Option(1, help="Ad-hoc Slave Unit ID override"),
-    schema: str = typer.Option("v10", help="Ad-hoc schema override"),
+    port: Optional[int] = typer.Option(None, help="Ad-hoc port override"),
+    unit_id: Optional[int] = typer.Option(None, help="Ad-hoc Slave Unit ID override"),
+    schema: Optional[str] = typer.Option(None, help="Ad-hoc schema override"),
 ):
     """Write an ordinal numeric value to a register."""
     try:

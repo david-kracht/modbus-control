@@ -9,17 +9,17 @@ from typing import Dict, Any, Set, Optional
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 
 from modbus_ctrl_contracts import AppConfig, DeviceConfig, WriteBatchRequest, TelemetryDeltaResponse
-from modbus_ctrl_core import ModbusControlEngine, resolve_schema
+from modbus_ctrl_core import ModbusControlEngine, resolve_schema, config
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("modbus-ctrl-center")
 
 # Path to the shared devices YAML file
 def get_devices_yaml_path() -> Path:
-    path_str = os.getenv("MODBUS_DEVICES_YAML", "devices.yaml")
-    return Path(path_str).resolve()
+    return config.MODBUS_DEVICES_YAML
 
 # Global caches and tasks
 active_websockets: Set[WebSocket] = set()
@@ -194,6 +194,15 @@ async def lifespan(app: FastAPI):
     await asyncio.gather(*polling_tasks.values(), return_exceptions=True)
 
 app = FastAPI(title="Modbus Control Suite API", lifespan=lifespan)
+
+# Enable CORS for independent frontend/tool clients
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # ---------------------------------------------------------------------------
 # API Endpoints
@@ -422,8 +431,23 @@ else:
 
 
 def main():
+    import argparse
     import uvicorn
-    uvicorn.run("modbus_ctrl_center.server:app", host="0.0.0.0", port=8000, reload=False)
+    
+    parser = argparse.ArgumentParser(description="Modbus Control Suite API Server")
+    parser.add_argument("--host", type=str, default=None, help="Bind host (overrides CTRL_CENTER_HOST)")
+    parser.add_argument("--port", type=int, default=None, help="Bind port (overrides CTRL_CENTER_PORT)")
+    parser.add_argument("--devices-yaml", type=str, default=None, help="Path to devices.yaml configuration file (overrides MODBUS_DEVICES_YAML)")
+    args = parser.parse_args()
+    
+    if args.devices_yaml is not None:
+        config.MODBUS_DEVICES_YAML = Path(args.devices_yaml).resolve()
+        
+    host = args.host if args.host is not None else config.CTRL_CENTER_HOST
+    port = args.port if args.port is not None else config.CTRL_CENTER_PORT
+    
+    logger.info("Starting Modbus Control Center Server on %s:%d...", host, port)
+    uvicorn.run("modbus_ctrl_center.server:app", host=host, port=port, reload=False)
 
 
 if __name__ == "__main__":

@@ -6,14 +6,17 @@ requires-python = ">=3.11"
 dependencies = [
     "typer>=0.12.0",
     "rich>=13.0.0",
-    "modbus-ctrl-core",
-    "modbus-ctrl-contracts",
+    "modbus-ctrl-core>=0.1.0",
+    "modbus-ctrl-contracts>=0.1.0",
 ]
 
 [project.scripts]
 modbus-ctrl = "modbus_ctrl_cli.main:app"
 
 [tool.uv.sources]
+# === REGISTRY SWITCH ===
+# Development: Sibling packages resolve locally from the workspace paths.
+# Production Release: Comment out the lines in [tool.uv.sources] below to resolve published versions from PyPI registry.
 modbus-ctrl-core = { workspace = true }
 modbus-ctrl-contracts = { workspace = true }
 

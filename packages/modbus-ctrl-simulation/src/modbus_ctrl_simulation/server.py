@@ -12,7 +12,7 @@ from modbus_ctrl_core import translator
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("modbus-sim")
 
-async def run_server(schema_name: str, port: int):
+async def run_server(schema_name: str, host: str, port: int):
     # Load schema
     schema = resolve_schema(schema_name)
     logger.info("Simulating device: %s (Firmware: %s)", schema.device_name, schema.firmware or "Unknown")
@@ -83,7 +83,12 @@ async def run_server(schema_name: str, port: int):
 
         # Convert to Modbus words
         if rtype in (ModbusRegisterType.INPUT_REGISTER, ModbusRegisterType.HOLDING_REGISTER):
-            words = translator.pack_register_value(mock_val, reg.data_type, byte_order="big", word_order="big")
+            words = translator.pack_register_value(
+                mock_val,
+                reg.data_type,
+                byte_order=schema.byte_order,
+                word_order=schema.word_order,
+            )
             target = ir_vals if rtype == ModbusRegisterType.INPUT_REGISTER else hr_vals
             for offset, w in enumerate(words):
                 target[addr + offset] = w
@@ -113,10 +118,20 @@ async def run_server(schema_name: str, port: int):
                         offset1 = offset0 + 1
                         try:
                             reg = input_floats[addr]
-                            val = translator.unpack_register_value([registers[offset0], registers[offset1]], reg.data_type)
+                            val = translator.unpack_register_value(
+                                [registers[offset0], registers[offset1]],
+                                reg.data_type,
+                                byte_order=schema.byte_order,
+                                word_order=schema.word_order,
+                            )
                             # Add small jitter
                             val += random.uniform(-0.05, 0.05)
-                            new_words = translator.pack_register_value(val, reg.data_type)
+                            new_words = translator.pack_register_value(
+                                val,
+                                reg.data_type,
+                                byte_order=schema.byte_order,
+                                word_order=schema.word_order,
+                            )
                             registers[offset0] = new_words[0]
                             registers[offset1] = new_words[1]
                         except Exception as e:
@@ -140,18 +155,24 @@ async def run_server(schema_name: str, port: int):
 
     device_context.simdevice.action = sim_action
 
-    logger.info("Starting Modbus TCP Simulator on port %d...", port)
-    await StartAsyncTcpServer(context=server_context, address=("0.0.0.0", port))
+    logger.info("Starting Modbus TCP Simulator on %s:%d...", host, port)
+    await StartAsyncTcpServer(context=server_context, address=(host, port))
     await asyncio.Event().wait()
 
 def main():
+    from modbus_ctrl_core import config
     parser = argparse.ArgumentParser(description="Modbus TCP Mock Simulator Server")
-    parser.add_argument("--schema", type=str, default="v10", help="Schema key or path (e.g. v10, v20, v30)")
-    parser.add_argument("--port", type=int, default=5020, help="Port to listen on (default 5020)")
+    parser.add_argument("--schema", type=str, default=None, help="Schema key or path (e.g. v10, v20, v30)")
+    parser.add_argument("--host", type=str, default=None, help="Host to listen on")
+    parser.add_argument("--port", type=int, default=None, help="Port to listen on")
     args = parser.parse_args()
 
+    schema = args.schema if args.schema is not None else config.SIM_SCHEMA
+    host = args.host if args.host is not None else config.SIM_HOST
+    port = args.port if args.port is not None else config.SIM_PORT
+
     try:
-        asyncio.run(run_server(args.schema, args.port))
+        asyncio.run(run_server(schema, host, port))
     except KeyboardInterrupt:
         logger.info("Simulator stopped.")
 

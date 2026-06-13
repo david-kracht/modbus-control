@@ -151,8 +151,8 @@ class ModbusControlEngine:
                             val = translator.unpack_register_value(
                                 raw_regs,
                                 reg.data_type,
-                                byte_order="big",
-                                word_order="big",
+                                byte_order=self.schema.byte_order,
+                                word_order=self.schema.word_order,
                             )
                             results[reg.name] = val
 
@@ -203,8 +203,8 @@ class ModbusControlEngine:
                         val = translator.unpack_register_value(
                             res.registers[:count],
                             reg.data_type,
-                            byte_order="big",
-                            word_order="big",
+                            byte_order=self.schema.byte_order,
+                            word_order=self.schema.word_order,
                         )
                         results[reg.name] = val
 
@@ -253,8 +253,8 @@ class ModbusControlEngine:
                     raw_regs = translator.pack_register_value(
                         val,
                         reg.data_type,
-                        byte_order="big",
-                        word_order="big",
+                        byte_order=self.schema.byte_order,
+                        word_order=self.schema.word_order,
                     )
                     if len(raw_regs) == 1:
                         res = await self.client.client.write_register(reg.address_dec, raw_regs[0], device_id=slave)

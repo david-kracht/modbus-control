@@ -6,13 +6,20 @@ requires-python = ">=3.11"
 dependencies = [
     "pydantic>=2.0.0",
     "pyyaml>=6.0.0",
-    "modbus-schema-common",
-    "modbus-config",
+    "modbus-schema-common>=1.0.0",
+    "modbus-config>=1.1.0",
 ]
 
 [tool.uv.sources]
+# === REGISTRY SWITCH ===
+# Development: Sibling packages resolve locally from the workspace paths.
+# Production Release: Comment out the lines in [tool.uv.sources] below to resolve published versions from PyPI registry.
 modbus-schema-common = { workspace = true }
 modbus-config = { workspace = true }
+
+# REGISTRY RELEASE MODE: To resolve dependencies from a PyPI registry instead:
+# 1. Comment out the [tool.uv.sources] workspace definitions above.
+# 2. Optionally pin custom registries (e.g. modbus-config = { registry = "my-private-registry" }) or resolve directly from default index.
 
 [build-system]
 requires = ["hatchling"]

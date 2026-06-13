@@ -7,14 +7,17 @@ dependencies = [
     "fastapi>=0.110.0",
     "uvicorn>=0.28.0",
     "websockets>=12.0",
-    "modbus-ctrl-core",
-    "modbus-ctrl-contracts",
+    "modbus-ctrl-core>=0.1.0",
+    "modbus-ctrl-contracts>=0.1.0",
 ]
 
 [project.scripts]
 modbus-ctrl-center = "modbus_ctrl_center.server:main"
 
 [tool.uv.sources]
+# === REGISTRY SWITCH ===
+# Development: Sibling packages resolve locally from the workspace paths.
+# Production Release: Comment out the lines in [tool.uv.sources] below to resolve published versions from PyPI registry.
 modbus-ctrl-core = { workspace = true }
 modbus-ctrl-contracts = { workspace = true }
 

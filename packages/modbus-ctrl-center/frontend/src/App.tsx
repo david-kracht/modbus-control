@@ -4,6 +4,16 @@ import {
   RefreshCw, Wifi, WifiOff, Database, Save, AlertTriangle, Info, Edit 
 } from "lucide-react";
 
+declare global {
+  interface ImportMeta {
+    readonly env: {
+      readonly VITE_API_URL?: string;
+      readonly VITE_WS_URL?: string;
+      [key: string]: string | undefined;
+    };
+  }
+}
+
 interface Device {
   name: string;
   host: string;
@@ -33,6 +43,8 @@ interface Schema {
   version: string;
   firmware: string | null;
   source_url: string | null;
+  byte_order?: string;
+  word_order?: string;
   registers: Register[];
 }
 
@@ -41,6 +53,15 @@ interface DeviceStatus {
   last_poll: number | null;
   error: string | null;
 }
+
+const API_BASE = (import.meta.env.VITE_API_URL || "").replace(/\/$/, "");
+
+const customFetch = (input: RequestInfo | URL, init?: RequestInit) => {
+  if (typeof input === "string" && input.startsWith("/api/")) {
+    return fetch(`${API_BASE}${input}`, init);
+  }
+  return fetch(input, init);
+};
 
 export default function App() {
   // Device list and active device selection
@@ -89,7 +110,7 @@ export default function App() {
     const schemaToFetch = formSchema.trim() || "v10";
     const fetchFormSchema = async () => {
       try {
-        const res = await fetch(`/api/schemas/${schemaToFetch}`);
+        const res = await customFetch(`/api/schemas/${schemaToFetch}`);
         if (res.ok) {
           const schemaData = await res.json();
           if (schemaData.registers) {
@@ -215,7 +236,7 @@ export default function App() {
 
   const fetchDevices = async () => {
     try {
-      const res = await fetch("/api/devices");
+      const res = await customFetch("/api/devices");
       const data = await res.json();
       setDevices(data);
       if (data.length > 0 && !selectedDeviceName) {
@@ -229,7 +250,7 @@ export default function App() {
 
   const fetchStatuses = async () => {
     try {
-      const res = await fetch("/api/devices/status");
+      const res = await customFetch("/api/devices/status");
       if (res.ok) {
         const data = await res.json();
         setDeviceStatuses(data);
@@ -257,7 +278,7 @@ export default function App() {
   const fetchSchemaAndValues = async (name: string) => {
     try {
       // Fetch schema
-      const schemaRes = await fetch(`/api/devices/${name}/schema`);
+      const schemaRes = await customFetch(`/api/devices/${name}/schema`);
       if (schemaRes.ok) {
         const schemaData = await schemaRes.json();
         setSchema(schemaData);
@@ -266,7 +287,7 @@ export default function App() {
       }
 
       // Fetch current values
-      const valRes = await fetch(`/api/devices/${name}/values`);
+      const valRes = await customFetch(`/api/devices/${name}/values`);
       if (valRes.ok) {
         const valData = await valRes.json();
         setValues(valData);
@@ -281,9 +302,10 @@ export default function App() {
 
   // 3. Manage WebSocket connection for live deltas and status updates
   useEffect(() => {
-    const loc = window.location;
-    const wsProto = loc.protocol === "https:" ? "wss:" : "ws:";
-    const wsUrl = `${wsProto}//${loc.host}/ws/telemetry`;
+    const wsBase = import.meta.env.VITE_WS_URL || (API_BASE ? API_BASE.replace(/^http/, "ws") : "");
+    const wsUrl = wsBase 
+      ? `${wsBase}/ws/telemetry` 
+      : `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}/ws/telemetry`;
 
     logger("Connecting to WebSocket: " + wsUrl);
     const ws = new WebSocket(wsUrl);
@@ -378,7 +400,7 @@ export default function App() {
   const triggerCoilAction = async (regName: string) => {
     setWritingStatus(`Triggering action: ${regName}...`);
     try {
-      const res = await fetch(`/api/devices/${selectedDeviceName}/write`, {
+      const res = await customFetch(`/api/devices/${selectedDeviceName}/write`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ writes: { [regName]: true } })
@@ -404,7 +426,7 @@ export default function App() {
     if (Object.keys(stagedChanges).length === 0) return;
     setWritingStatus("Applying staged changes...");
     try {
-      const res = await fetch(`/api/devices/${selectedDeviceName}/write`, {
+      const res = await customFetch(`/api/devices/${selectedDeviceName}/write`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ writes: stagedChanges })
@@ -460,7 +482,7 @@ export default function App() {
       const url = formMode === "add" ? "/api/devices" : `/api/devices/${editingDeviceOriginalName}`;
       const method = formMode === "add" ? "POST" : "PUT";
       
-      const res = await fetch(url, {
+      const res = await customFetch(url, {
         method: method,
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload)
@@ -486,7 +508,7 @@ export default function App() {
   const handleDeleteDevice = async (name: string) => {
     if (!confirm(`Are you sure you want to delete device '${name}'?`)) return;
     try {
-      const res = await fetch(`/api/devices/${name}`, { method: "DELETE" });
+      const res = await customFetch(`/api/devices/${name}`, { method: "DELETE" });
       if (res.ok) {
         fetchDevices();
         if (selectedDeviceName === name) {
@@ -859,6 +881,12 @@ export default function App() {
                 <div className="flex flex-wrap items-center gap-x-3 gap-y-2 mt-2 text-xs text-slate-400">
                   <span className="bg-slate-900 px-2.5 py-1 rounded-md border border-slate-800/80">Type: {schema.device_name}</span>
                   <span className="bg-slate-900 px-2.5 py-1 rounded-md border border-slate-800/80">Schema: {activeDevice?.schema_name || ""} ({schema.version})</span>
+                  {schema.byte_order && (
+                    <span className="bg-slate-900 px-2.5 py-1 rounded-md border border-slate-800/80">Byte Order: {schema.byte_order}</span>
+                  )}
+                  {schema.word_order && (
+                    <span className="bg-slate-900 px-2.5 py-1 rounded-md border border-slate-800/80">Word Order: {schema.word_order}</span>
+                  )}
                   {schema.firmware && (
                     <span className="bg-slate-900 px-2.5 py-1 rounded-md border border-slate-800/80">
                       Firmware: {schema.firmware}
