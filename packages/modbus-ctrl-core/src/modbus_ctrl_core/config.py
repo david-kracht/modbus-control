@@ -22,3 +22,7 @@ DEFAULT_MODBUS_HOST: str | None = os.getenv("DEFAULT_MODBUS_HOST", None)
 DEFAULT_MODBUS_PORT: int = int(os.getenv("DEFAULT_MODBUS_PORT", "502"))
 DEFAULT_MODBUS_UNIT_ID: int = int(os.getenv("DEFAULT_MODBUS_UNIT_ID", "1"))
 DEFAULT_MODBUS_SCHEMA: str = os.getenv("DEFAULT_MODBUS_SCHEMA", "v10")
+
+# Customization Settings
+SUITE_TITLE: str = os.getenv("SUITE_TITLE", "Modbus Control Suite")
+SUITE_LOGO_PATH: str = os.getenv("SUITE_LOGO_PATH", "")

@@ -12,7 +12,6 @@ The suite consists of three core components:
 3. **Control CLI (`modbus-ctrl`)**: CLI tool for device management and ad-hoc register reads/writes.
 
 ---
-
 ## Configuration
 
 Both services and CLI support environment variables (loaded from `.env`) and CLI flag overrides:
@@ -29,6 +28,16 @@ Both services and CLI support environment variables (loaded from `.env`) and CLI
 | `DEFAULT_MODBUS_PORT` | `502` | Ad-hoc fallback port | `--default-port` |
 | `DEFAULT_MODBUS_UNIT_ID`| `1` | Ad-hoc fallback unit ID | `--default-unit-id` |
 | `DEFAULT_MODBUS_SCHEMA` | `v10` | Ad-hoc fallback schema | `--default-schema` |
+| `SUITE_TITLE` | `Modbus Control Suite` | Main title/branding of the suite | None |
+| `SUITE_LOGO_PATH` | (empty) | Absolute path to a custom SVG/PNG logo file | None |
+
+### Branding & Customization
+You can change the visual branding and console output text across the entire suite:
+- **Title Customization**: Set `SUITE_TITLE` in `.env` or your env variables. This dynamically updates:
+  - CLI help texts (e.g. `uv run modbus-sim --help` displays `<SUITE_TITLE> - Mock Simulator Server`, etc.).
+  - FastAPI Server title and console log headers on startup.
+  - React Control Center sidebar/header title (e.g. `<SUITE_TITLE> - Control Center`).
+- **Logo Customization**: Set `SUITE_LOGO_PATH` to the absolute path of a custom logo image (SVG or PNG). The React frontend will dynamically load it; if unset or the file loading fails, it gracefully falls back to the default packaged logo or standard Lucide `<Cpu>` icon.
 
 *To run the React frontend independently in dev mode (CORS enabled on backend), configure:*
 - `VITE_API_URL`: Backend API URL (e.g. `http://localhost:8000`)

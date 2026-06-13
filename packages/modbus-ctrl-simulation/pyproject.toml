@@ -8,6 +8,7 @@ dependencies = [
     "modbus-schema-common>=1.0.0",
     "modbus-config>=1.1.0",
     "modbus-ctrl-contracts>=0.1.0",
+    "typer>=0.12.0",
 ]
 
 [project.scripts]

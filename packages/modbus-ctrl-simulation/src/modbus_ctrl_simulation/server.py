@@ -7,7 +7,9 @@ from pymodbus.datastore import ModbusServerContext, ModbusDeviceContext, ModbusS
 from modbus_schema_common.models import ModbusRegisterType, ModbusDataType
 
 from modbus_ctrl_core.engine import resolve_schema
-from modbus_ctrl_core import translator
+from modbus_ctrl_core import translator, config
+import typer
+from typing import Optional
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("modbus-sim")
@@ -155,26 +157,32 @@ async def run_server(schema_name: str, host: str, port: int):
 
     device_context.simdevice.action = sim_action
 
-    logger.info("Starting Modbus TCP Simulator on %s:%d...", host, port)
+    logger.info("Starting %s - Mock Simulator Server on %s:%d...", config.SUITE_TITLE, host, port)
     await StartAsyncTcpServer(context=server_context, address=(host, port))
     await asyncio.Event().wait()
 
-def main():
-    from modbus_ctrl_core import config
-    parser = argparse.ArgumentParser(description="Modbus TCP Mock Simulator Server")
-    parser.add_argument("--schema", type=str, default=None, help="Schema key or path (e.g. v10, v20, v30)")
-    parser.add_argument("--host", type=str, default=None, help="Host to listen on")
-    parser.add_argument("--port", type=int, default=None, help="Port to listen on")
-    args = parser.parse_args()
+cli_app = typer.Typer(help=f"{config.SUITE_TITLE} - Mock Simulator Server")
 
-    schema = args.schema if args.schema is not None else config.SIM_SCHEMA
-    host = args.host if args.host is not None else config.SIM_HOST
-    port = args.port if args.port is not None else config.SIM_PORT
+
+@cli_app.callback(invoke_without_command=True)
+def main_cli(
+    schema: Optional[str] = typer.Option(None, "--schema", help="Schema key or path (e.g. v10, v20, v30)"),
+    host: Optional[str] = typer.Option(None, "--host", help="Host to listen on"),
+    port: Optional[int] = typer.Option(None, "--port", help="Port to listen on"),
+):
+    resolved_schema = schema if schema is not None else config.SIM_SCHEMA
+    resolved_host = host if host is not None else config.SIM_HOST
+    resolved_port = port if port is not None else config.SIM_PORT
 
     try:
-        asyncio.run(run_server(schema, host, port))
+        asyncio.run(run_server(resolved_schema, resolved_host, resolved_port))
     except KeyboardInterrupt:
         logger.info("Simulator stopped.")
+
+
+def main():
+    cli_app()
+
 
 if __name__ == "__main__":
     main()

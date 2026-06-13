@@ -13,6 +13,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from modbus_ctrl_contracts import AppConfig, DeviceConfig, WriteBatchRequest, TelemetryDeltaResponse
 from modbus_ctrl_core import ModbusControlEngine, resolve_schema, config
+import typer
+
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("modbus-ctrl-center")
@@ -193,7 +195,7 @@ async def lifespan(app: FastAPI):
         task.cancel()
     await asyncio.gather(*polling_tasks.values(), return_exceptions=True)
 
-app = FastAPI(title="Modbus Control Suite API", lifespan=lifespan)
+app = FastAPI(title=f"{config.SUITE_TITLE} - API Server", lifespan=lifespan)
 
 # Enable CORS for independent frontend/tool clients
 app.add_middleware(
@@ -207,6 +209,28 @@ app.add_middleware(
 # ---------------------------------------------------------------------------
 # API Endpoints
 # ---------------------------------------------------------------------------
+
+@app.get("/api/config")
+async def get_suite_config():
+    return {
+        "suite_title": config.SUITE_TITLE,
+    }
+
+
+@app.get("/api/logo")
+async def get_suite_logo():
+    logo_path = config.SUITE_LOGO_PATH
+    if logo_path:
+        p = Path(logo_path).resolve()
+        if p.is_file():
+            return FileResponse(p)
+            
+    # Serve default packaged logo
+    default_p = Path(__file__).parent / "logo.png"
+    if default_p.is_file():
+        return FileResponse(default_p)
+        
+    raise HTTPException(status_code=404, detail="Logo not found")
 
 @app.get("/api/devices")
 async def get_devices():
@@ -427,27 +451,31 @@ else:
 
     @app.get("/")
     async def index():
-        return {"message": "Modbus Control Suite API (API only mode - static frontend not built)"}
+        return {"message": f"{config.SUITE_TITLE} - API Server (API only mode - static frontend not built)"}
+
+
+cli_app = typer.Typer(help=f"{config.SUITE_TITLE} - API Server")
+
+
+@cli_app.callback(invoke_without_command=True)
+def main_cli(
+    host: Optional[str] = typer.Option(None, "--host", help="Bind host (overrides CTRL_CENTER_HOST)"),
+    port: Optional[int] = typer.Option(None, "--port", help="Bind port (overrides CTRL_CENTER_PORT)"),
+    devices_yaml: Optional[Path] = typer.Option(None, "--devices-yaml", help="Path to devices.yaml configuration file (overrides MODBUS_DEVICES_YAML)"),
+):
+    import uvicorn
+    if devices_yaml is not None:
+        config.MODBUS_DEVICES_YAML = devices_yaml.resolve()
+        
+    resolved_host = host if host is not None else config.CTRL_CENTER_HOST
+    resolved_port = port if port is not None else config.CTRL_CENTER_PORT
+    
+    logger.info("Starting %s - API Server on %s:%d...", config.SUITE_TITLE, resolved_host, resolved_port)
+    uvicorn.run("modbus_ctrl_center.server:app", host=resolved_host, port=resolved_port, reload=False)
 
 
 def main():
-    import argparse
-    import uvicorn
-    
-    parser = argparse.ArgumentParser(description="Modbus Control Suite API Server")
-    parser.add_argument("--host", type=str, default=None, help="Bind host (overrides CTRL_CENTER_HOST)")
-    parser.add_argument("--port", type=int, default=None, help="Bind port (overrides CTRL_CENTER_PORT)")
-    parser.add_argument("--devices-yaml", type=str, default=None, help="Path to devices.yaml configuration file (overrides MODBUS_DEVICES_YAML)")
-    args = parser.parse_args()
-    
-    if args.devices_yaml is not None:
-        config.MODBUS_DEVICES_YAML = Path(args.devices_yaml).resolve()
-        
-    host = args.host if args.host is not None else config.CTRL_CENTER_HOST
-    port = args.port if args.port is not None else config.CTRL_CENTER_PORT
-    
-    logger.info("Starting Modbus Control Center Server on %s:%d...", host, port)
-    uvicorn.run("modbus_ctrl_center.server:app", host=host, port=port, reload=False)
+    cli_app()
 
 
 if __name__ == "__main__":

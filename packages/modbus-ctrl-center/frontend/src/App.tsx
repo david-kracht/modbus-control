@@ -64,6 +64,9 @@ const customFetch = (input: RequestInfo | URL, init?: RequestInit) => {
 };
 
 export default function App() {
+  const [suiteTitle, setSuiteTitle] = useState<string>("Modbus Control Suite");
+  const [logoFailed, setLogoFailed] = useState<boolean>(false);
+
   // Device list and active device selection
   const [devices, setDevices] = useState<Device[]>([]);
   const [selectedDeviceName, setSelectedDeviceName] = useState<string>("");
@@ -232,7 +235,22 @@ export default function App() {
   // 1. Fetch devices on mount
   useEffect(() => {
     fetchDevices();
+    fetchSuiteConfig();
   }, []);
+
+  const fetchSuiteConfig = async () => {
+    try {
+      const res = await customFetch("/api/config");
+      if (res.ok) {
+        const data = await res.json();
+        if (data && data.suite_title) {
+          setSuiteTitle(data.suite_title);
+        }
+      }
+    } catch (e) {
+      console.error("Error fetching suite config:", e);
+    }
+  };
 
   const fetchDevices = async () => {
     try {
@@ -562,12 +580,20 @@ export default function App() {
       {/* Header bar */}
       <header className="border-b border-slate-900 bg-slate-900/40 backdrop-blur-md sticky top-0 z-40 px-6 py-4 flex items-center justify-between">
         <div className="flex items-center space-x-3">
-          <div className="bg-gradient-to-tr from-amber-500 to-orange-600 p-2 rounded-lg text-white shadow-lg shadow-orange-500/20">
-            <Cpu className="h-6 w-6" />
-          </div>
+          {!logoFailed ? (
+            <img
+              src={`${API_BASE}/api/logo`}
+              alt="Logo"
+              className="h-10 w-auto max-h-10 object-contain rounded"
+              onError={() => setLogoFailed(true)}
+            />
+          ) : (
+            <div className="bg-gradient-to-tr from-blue-600 to-indigo-700 p-2 rounded-lg text-white shadow-lg shadow-blue-500/20">
+              <Cpu className="h-6 w-6" />
+            </div>
+          )}
           <div>
-            <h1 className="text-xl font-bold tracking-tight text-white">Modbus Control Center</h1>
-            <p className="text-xs text-slate-400">Schema-Driven Dynamic Automation</p>
+            <h1 className="text-xl font-bold tracking-tight text-white">{suiteTitle} - Control Center</h1>
           </div>
         </div>
 
@@ -619,7 +645,7 @@ export default function App() {
                 <input 
                   type="text" placeholder="Auto-generated if empty"
                   value={formName} onChange={(e) => setFormName(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:border-amber-500"
+                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:border-blue-500"
                 />
               </div>
               <div>
@@ -627,7 +653,7 @@ export default function App() {
                 <input 
                   type="text" placeholder="e.g. 192.168.1.15" required
                   value={formHost} onChange={(e) => setFormHost(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:border-amber-500"
+                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:border-blue-500"
                 />
               </div>
               <div className="grid grid-cols-2 gap-2">
@@ -636,7 +662,7 @@ export default function App() {
                   <input 
                     type="number" placeholder="502"
                     value={formPort} onChange={(e) => setFormPort(e.target.value === "" ? "" : Number(e.target.value))}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:border-amber-500"
+                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:border-blue-500"
                   />
                 </div>
                 <div>
@@ -644,7 +670,7 @@ export default function App() {
                   <input 
                     type="number" placeholder="1"
                     value={formUnitId} onChange={(e) => setFormUnitId(e.target.value === "" ? "" : Number(e.target.value))}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:border-amber-500"
+                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:border-blue-500"
                   />
                 </div>
               </div>
@@ -653,7 +679,7 @@ export default function App() {
                 <input 
                   type="text" placeholder="Defaults to latest (v30)"
                   value={formSchema} onChange={(e) => setFormSchema(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:border-amber-500"
+                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:border-blue-500"
                 />
               </div>
               <div>
@@ -661,7 +687,7 @@ export default function App() {
                 <input 
                   type="number" step="0.1" placeholder="1.0"
                   value={formInterval} onChange={(e) => setFormInterval(e.target.value === "" ? "" : Number(e.target.value))}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:border-amber-500"
+                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:border-blue-500"
                 />
               </div>
               <div className="flex flex-col gap-2">
@@ -712,7 +738,7 @@ export default function App() {
                     <select
                       value={selectedRegToAdd}
                       onChange={(e) => setSelectedRegToAdd(e.target.value)}
-                      className="flex-1 min-w-0 bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-amber-500 truncate"
+                      className="flex-1 min-w-0 bg-slate-950 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-blue-500 truncate"
                     >
                       {Object.entries(groupedRegisters)
                         .sort(([typeA], [typeB]) => {
@@ -767,7 +793,7 @@ export default function App() {
                 <input 
                   type="checkbox" id="formActive"
                   checked={formActive} onChange={(e) => setFormActive(e.target.checked)}
-                  className="rounded bg-slate-950 border-slate-800 text-amber-500 focus:ring-amber-500"
+                  className="rounded bg-slate-950 border-slate-800 text-blue-500 focus:ring-blue-500"
                 />
                 <label htmlFor="formActive" className="text-xs text-slate-350 select-none">Active / Poll enabled</label>
               </div>
@@ -780,7 +806,7 @@ export default function App() {
                 </button>
                 <button 
                   type="submit"
-                  className="flex-1 py-2 bg-gradient-to-r from-amber-500 to-orange-600 hover:from-amber-600 hover:to-orange-700 text-white font-medium rounded-lg text-sm transition-all shadow-md shadow-orange-500/10"
+                  className="flex-1 py-2 bg-gradient-to-r from-blue-600 to-indigo-700 hover:from-blue-700 hover:to-indigo-800 text-white font-medium rounded-lg text-sm transition-all shadow-md shadow-blue-500/10"
                 >
                   {formMode === "add" ? "Add Device" : "Save"}
                 </button>
@@ -809,13 +835,24 @@ export default function App() {
                 <div 
                   key={dev.name}
                   onClick={() => setSelectedDeviceName(dev.name)}
-                  className={`group border rounded-xl p-4 flex items-center justify-between cursor-pointer transition-all ${selectedDeviceName === dev.name ? "bg-amber-500/10 border-amber-500 text-white" : "bg-slate-900/20 border-slate-800 text-slate-300 hover:bg-slate-900/50 hover:border-slate-700"}`}
+                  className={`group border rounded-xl p-4 flex items-center justify-between cursor-pointer transition-all ${selectedDeviceName === dev.name ? "bg-blue-600/10 border-blue-600 text-white" : "bg-slate-900/20 border-slate-800 text-slate-300 hover:bg-slate-900/50 hover:border-slate-700"}`}
                 >
                   <div className="flex items-center space-x-3 min-w-0 flex-1">
-                    <div className="relative">
-                      <div className={`p-2 rounded-lg ${selectedDeviceName === dev.name ? "bg-amber-500 text-white" : "bg-slate-900 text-slate-400 group-hover:text-slate-200"}`}>
-                        <Cpu className="h-4 w-4" />
-                      </div>
+                    <div className="relative shrink-0">
+                      {!logoFailed ? (
+                        <div className={`p-1.5 w-8 h-8 flex items-center justify-center rounded-lg bg-slate-900 border ${selectedDeviceName === dev.name ? "border-blue-500/50" : "border-slate-800"}`}>
+                          <img
+                            src={`${API_BASE}/api/logo`}
+                            alt="Logo"
+                            className="h-5 w-auto max-h-5 object-contain rounded"
+                            onError={() => setLogoFailed(true)}
+                          />
+                        </div>
+                      ) : (
+                        <div className={`p-2 rounded-lg ${selectedDeviceName === dev.name ? "bg-blue-600 text-white" : "bg-slate-900 text-slate-400 group-hover:text-slate-200"}`}>
+                          <Cpu className="h-4 w-4" />
+                        </div>
+                      )}
                       {/* Status indicator dot */}
                       <span className={`absolute -bottom-1 -right-1 flex h-3 w-3 rounded-full border-2 border-slate-950 ${statusColor}`} />
                     </div>
@@ -917,14 +954,14 @@ export default function App() {
 
           {/* Staged Changes alert banners */}
           {Object.keys(stagedChanges).length > 0 && (
-            <div className="bg-amber-950/40 border border-amber-800/60 rounded-xl p-4 flex flex-col md:flex-row items-start md:items-center justify-between gap-4 shadow-lg shadow-amber-500/5">
+            <div className="bg-blue-950/40 border border-blue-900/60 rounded-xl p-4 flex flex-col md:flex-row items-start md:items-center justify-between gap-4 shadow-lg shadow-blue-500/5">
               <div className="flex items-center space-x-3">
-                <div className="bg-amber-500/20 p-2 rounded-lg text-amber-400">
+                <div className="bg-blue-500/20 p-2 rounded-lg text-blue-400">
                   <AlertTriangle className="h-5 w-5" />
                 </div>
                 <div>
                   <h4 className="font-semibold text-sm text-white">Pending Configuration Changes ({Object.keys(stagedChanges).length})</h4>
-                  <p className="text-xs text-amber-300/80 mt-0.5">Holding register values have been staged but not written to the Modbus device yet.</p>
+                  <p className="text-xs text-blue-300/80 mt-0.5">Holding register values have been staged but not written to the Modbus device yet.</p>
                 </div>
               </div>
               <div className="flex items-center space-x-2 self-end md:self-auto">
@@ -936,7 +973,7 @@ export default function App() {
                 </button>
                 <button 
                   onClick={applyStagedChanges}
-                  className="flex items-center gap-1.5 px-4 py-1.5 bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold rounded-lg text-xs tracking-wide shadow-md shadow-amber-500/10 transition-colors"
+                  className="flex items-center gap-1.5 px-4 py-1.5 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-lg text-xs tracking-wide shadow-md shadow-blue-500/10 transition-colors"
                 >
                   <Save className="h-3.5 w-3.5" />
                   Apply Changes
@@ -948,7 +985,7 @@ export default function App() {
           {/* Action progress log banner */}
           {writingStatus && (
             <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 flex items-center space-x-3">
-              <RefreshCw className="h-4 w-4 text-amber-500 animate-spin" />
+              <RefreshCw className="h-4 w-4 text-blue-400 animate-spin" />
               <span className="text-sm text-slate-300">{writingStatus}</span>
             </div>
           )}
@@ -1057,7 +1094,7 @@ export default function App() {
                           </div>
                           <button 
                             onClick={() => triggerCoilAction(reg.name)}
-                            className="flex items-center gap-1 px-3 py-1.5 bg-gradient-to-r from-amber-500 to-orange-600 hover:from-amber-600 hover:to-orange-700 text-white font-bold rounded-lg text-[10px] uppercase tracking-wider shadow-sm transition-all"
+                            className="flex items-center gap-1 px-3 py-1.5 bg-gradient-to-r from-blue-600 to-indigo-700 hover:from-blue-700 hover:to-indigo-800 text-white font-bold rounded-lg text-[10px] uppercase tracking-wider shadow-sm transition-all"
                           >
                             <Play className="h-3 w-3 fill-current" />
                             Trigger
@@ -1094,7 +1131,7 @@ export default function App() {
                       return (
                         <div 
                           key={reg.name} 
-                          className={`flex flex-col gap-2 p-4 rounded-xl border transition-all ${isStaged ? "bg-amber-500/5 border-amber-500/80" : "bg-slate-950/40 border-slate-900/80"}`}
+                          className={`flex flex-col gap-2 p-4 rounded-xl border transition-all ${isStaged ? "bg-blue-500/5 border-blue-500/80" : "bg-slate-950/40 border-slate-900/80"}`}
                         >
                           <div className="flex items-start justify-between gap-3">
                             <div>
@@ -1102,7 +1139,7 @@ export default function App() {
                               <h4 className="font-bold text-xs text-white" title={reg.name}>{reg.name}</h4>
                             </div>
                             {isStaged && (
-                              <span className="text-[9px] bg-amber-500 text-slate-950 font-extrabold px-1.5 py-0.5 rounded tracking-wide uppercase">Staged</span>
+                              <span className="text-[9px] bg-blue-600 text-white font-extrabold px-1.5 py-0.5 rounded tracking-wide uppercase">Staged</span>
                             )}
                           </div>
 
@@ -1114,7 +1151,7 @@ export default function App() {
                                 value={enumSelectVal}
                                 onChange={(e) => handleStageChange(reg.name, Number(e.target.value), currentVal)}
                                 disabled={!hasCurrentVal}
-                                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-amber-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
                               >
                                 {!hasCurrentVal && <option value="">Loading...</option>}
                                 {hasCurrentVal && Object.entries(reg.enum_values).map(([code, label]) => (
@@ -1131,7 +1168,7 @@ export default function App() {
                                   onChange={(e) => handleStageChange(reg.name, e.target.value, currentVal)}
                                   placeholder={hasCurrentVal ? formatDisplayVal(currentVal, reg.data_type) : "Offline"}
                                   disabled={!hasCurrentVal}
-                                  className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-3 pr-10 py-2 text-xs text-white font-mono focus:outline-none focus:border-amber-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                                  className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-3 pr-10 py-2 text-xs text-white font-mono focus:outline-none focus:border-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
                                 />
                                 {reg.unit && (
                                   <span className="absolute right-3 text-[10px] text-slate-500 font-semibold">{reg.unit}</span>
@@ -1147,7 +1184,7 @@ export default function App() {
                                   onChange={(e) => handleStageChange(reg.name, e.target.value, currentVal)}
                                   placeholder={hasCurrentVal ? formatDisplayVal(currentVal, reg.data_type) : "Offline"}
                                   disabled={!hasCurrentVal}
-                                  className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-3 pr-10 py-2 text-xs text-white focus:outline-none focus:border-amber-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                                  className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-3 pr-10 py-2 text-xs text-white focus:outline-none focus:border-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
                                 />
                                 {reg.unit && (
                                   <span className="absolute right-3 text-[10px] text-slate-500 font-semibold">{reg.unit}</span>

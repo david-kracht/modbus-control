@@ -17,7 +17,7 @@ from modbus_ctrl_contracts import AppConfig, DeviceConfig
 from modbus_ctrl_core import ModbusControlEngine, resolve_schema, config
 from modbus_schema_common.models import ModbusRegisterType, ModbusDataType
 
-app = typer.Typer(help="Modbus Control Suite CLI")
+app = typer.Typer(help=f"{config.SUITE_TITLE} - CLI")
 console_output = Console()
 
 @app.callback()

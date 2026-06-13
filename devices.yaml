@@ -5,3 +5,7 @@ devices:
   schema_name: v10
   registers:
   - LogSystemOffOk
+  - LogSystemOnOk
+  - SystemType
+  - CurrentErrorActive
+  - BatIdConfig
