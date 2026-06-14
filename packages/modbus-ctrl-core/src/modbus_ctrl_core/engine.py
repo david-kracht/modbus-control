@@ -10,9 +10,9 @@ from modbus_schema_common.models import (
     ModbusRegisterType,
 )
 from modbus_ctrl_contracts import DeviceConfig
-from modbus_ctrl_core.client import ModbusClientWrapper
-from modbus_ctrl_core.aggregator import build_read_blocks, ReadBlock
-from modbus_ctrl_core import translator
+from modbus_common.client import ModbusClientWrapper
+from modbus_common.aggregator import build_read_blocks, ReadBlock
+from modbus_common import translator
 
 logger = logging.getLogger(__name__)
 

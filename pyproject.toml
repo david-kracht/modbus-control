@@ -9,7 +9,9 @@ dependencies = []
 workspace = { members = [
     "packages/*",
     "../efoy-modbus-config/packages/modbus-schema-common",
+    "../efoy-modbus-config/packages/modbus-common",
     "../efoy-modbus-config/packages/modbus-config",
+    "../efoy-modbus-config/packages/modbus-simulator",
 ] }
 
 [dependency-groups]

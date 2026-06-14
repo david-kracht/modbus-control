@@ -4,14 +4,15 @@ requires-python = ">=3.11"
 
 [manifest]
 members = [
+    "modbus-common",
     "modbus-config",
     "modbus-control-workspace",
     "modbus-ctrl-center",
     "modbus-ctrl-cli",
     "modbus-ctrl-contracts",
     "modbus-ctrl-core",
-    "modbus-ctrl-simulation",
     "modbus-schema-common",
+    "modbus-simulator",
 ]
 
 [[package]]
@@ -131,6 +132,21 @@ wheels = [
 ]
 
 [[package]]
+name = "modbus-common"
+version = "0.1.0"
+source = { editable = "../efoy-modbus-config/packages/modbus-common" }
+dependencies = [
+    { name = "modbus-schema-common" },
+    { name = "pymodbus" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "modbus-schema-common", editable = "../efoy-modbus-config/packages/modbus-schema-common" },
+    { name = "pymodbus", specifier = ">=3.6.8" },
+]
+
+[[package]]
 name = "modbus-config"
 version = "1.1.0"
 source = { editable = "../efoy-modbus-config/packages/modbus-config" }
@@ -222,6 +238,7 @@ name = "modbus-ctrl-core"
 version = "0.1.0"
 source = { editable = "packages/modbus-ctrl-core" }
 dependencies = [
+    { name = "modbus-common" },
     { name = "modbus-ctrl-contracts" },
     { name = "pymodbus" },
     { name = "python-dotenv" },
@@ -229,30 +246,10 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "modbus-common", editable = "../efoy-modbus-config/packages/modbus-common" },
     { name = "modbus-ctrl-contracts", editable = "packages/modbus-ctrl-contracts" },
     { name = "pymodbus", specifier = ">=3.8.0" },
     { name = "python-dotenv", specifier = ">=1.0.1" },
-]
-
-[[package]]
-name = "modbus-ctrl-simulation"
-version = "0.1.0"
-source = { editable = "packages/modbus-ctrl-simulation" }
-dependencies = [
-    { name = "modbus-config" },
-    { name = "modbus-ctrl-contracts" },
-    { name = "modbus-schema-common" },
-    { name = "pymodbus" },
-    { name = "typer" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "modbus-config", editable = "../efoy-modbus-config/packages/modbus-config" },
-    { name = "modbus-ctrl-contracts", editable = "packages/modbus-ctrl-contracts" },
-    { name = "modbus-schema-common", editable = "../efoy-modbus-config/packages/modbus-schema-common" },
-    { name = "pymodbus", specifier = ">=3.8.0" },
-    { name = "typer", specifier = ">=0.12.0" },
 ]
 
 [[package]]
@@ -265,6 +262,25 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [{ name = "pydantic", specifier = ">=2.0.0" }]
+
+[[package]]
+name = "modbus-simulator"
+version = "0.1.0"
+source = { editable = "../efoy-modbus-config/packages/modbus-simulator" }
+dependencies = [
+    { name = "modbus-common" },
+    { name = "modbus-schema-common" },
+    { name = "pymodbus" },
+    { name = "typer" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "modbus-common", editable = "../efoy-modbus-config/packages/modbus-common" },
+    { name = "modbus-schema-common", editable = "../efoy-modbus-config/packages/modbus-schema-common" },
+    { name = "pymodbus", specifier = ">=3.6.8" },
+    { name = "typer", specifier = ">=0.12.3" },
+]
 
 [[package]]
 name = "packaging"
