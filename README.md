@@ -23,11 +23,11 @@ Both services and CLI support environment variables (loaded from `.env`) and CLI
 | `CTRL_CENTER_PORT` | `8000` | Backend bind port | `--port` |
 | `SIM_HOST` | `0.0.0.0` | Simulator bind host | `--host` |
 | `SIM_PORT` | `5020` | Simulator bind port | `--port` |
-| `SIM_SCHEMA` | `v10` | Simulator schema template | `--schema` |
+| `SIM_SCHEMA` | `modbus_config/latest` | Simulator schema template | `--schema` |
 | `DEFAULT_MODBUS_HOST` | `127.0.0.1` | Ad-hoc fallback host (when no yaml) | `--default-host` |
 | `DEFAULT_MODBUS_PORT` | `502` | Ad-hoc fallback port | `--default-port` |
 | `DEFAULT_MODBUS_UNIT_ID`| `1` | Ad-hoc fallback unit ID | `--default-unit-id` |
-| `DEFAULT_MODBUS_SCHEMA` | `v10` | Ad-hoc fallback schema | `--default-schema` |
+| `DEFAULT_MODBUS_SCHEMA` | `modbus_config/latest` | Ad-hoc fallback schema | `--default-schema` |
 | `SUITE_TITLE` | `Modbus Control Suite` | Main title/branding of the suite | None |
 | `SUITE_LOGO_PATH` | (empty) | Absolute path to a custom SVG/PNG logo file | None |
 
@@ -160,6 +160,18 @@ When a new device schema or registry parameter is introduced (e.g. in the extern
    - During development, reference the updated local path in `[tool.uv.sources]` to implement and test the suite against the new schema features.
    - Once verified, update the dependency requirement in `pyproject.toml` files to enforce the new schema version (e.g. `"modbus-config>=1.2.0"`).
    - Build and release the updated control packages to the registry.
+
+#### Case C: Installing Additional Schema Plugins (Post-Release)
+The Modbus Schema system leverages a decoupled, dynamic **Python Entry Point** architecture. This means the Control Suite has **no hardcoded dependencies** on specific schema packages. 
+
+You can dynamically add new schema definitions (e.g., for a new device manufacturer) to an existing, deployed Control Suite *without* needing a new release of the control application:
+
+1. **Develop the Schema Package**: Build a Python package (e.g., `wago-modbus-config`) that utilizes `modbus-schema-common` and registers itself via the `[project.entry-points."modbus.schema"]` hook.
+2. **Install the Plugin**: Install the new package into the same Python environment where the Control Suite backend is running (e.g., `pip install wago-modbus-config` or `uv pip install ...`).
+3. **Automatic Discovery**: Restart the FastAPI Backend (`modbus-ctrl-center`). Python will automatically discover the new plugin via its entry point.
+4. **UI Integration**:
+   - **Frontend Dashboard**: The React SPA dynamically fetches `/api/schemas/available`. The new schema (e.g., `wago/latest`) will instantly appear in the schema `<select>` dropdown when adding or editing a device.
+   - **CLI TUI**: The `modbus-ctrl dashboard` also dynamically evaluates available schemas. The new package will appear in the interactive Schema Selection modal (accessed by pressing `[Enter]` on the Schema Name field).
 
 ---
 

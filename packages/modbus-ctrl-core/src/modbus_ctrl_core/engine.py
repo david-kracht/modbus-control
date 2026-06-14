@@ -16,7 +16,7 @@ from modbus_ctrl_core import translator
 
 logger = logging.getLogger(__name__)
 
-from modbus_ctrl_core.schema_resolver import resolve_schema
+from modbus_schema_common.resolver import resolve_schema
 
 class ModbusControlEngine:
     """

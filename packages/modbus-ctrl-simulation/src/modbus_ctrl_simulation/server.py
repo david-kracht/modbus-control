@@ -6,7 +6,7 @@ from pymodbus.server import StartAsyncTcpServer
 from pymodbus.datastore import ModbusServerContext, ModbusDeviceContext, ModbusSparseDataBlock
 from modbus_schema_common.models import ModbusRegisterType, ModbusDataType
 
-from modbus_ctrl_core.engine import resolve_schema
+from modbus_schema_common.resolver import resolve_schema
 from modbus_ctrl_core import translator, config
 import typer
 from typing import Optional

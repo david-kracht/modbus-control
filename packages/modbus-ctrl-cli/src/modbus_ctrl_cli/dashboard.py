@@ -264,6 +264,9 @@ def run_tui_dashboard_impl(
     register_select_index = 0
     register_select_filter = ""
 
+    schema_select_list = []
+    schema_select_index = 0
+
     # Background polling states
     poll_task = None
     poll_updated = False
@@ -529,6 +532,36 @@ def run_tui_dashboard_impl(
                     style="yellow"
                 )
             )
+        elif active_modal == "select_schema":
+            layout["main_content"].split_row(
+                Layout(name="main_table", ratio=2),
+                Layout(name="modal_view", ratio=3)
+            )
+            sel_lines = []
+            for i, sch in enumerate(schema_select_list):
+                is_highlighted = (i == schema_select_index)
+                is_selected = (sch == device_form_fields.get("schema_name", ""))
+                
+                check_char = f"✨ [bold yellow]{escape('[x]')}[/bold yellow]" if is_selected else f"  [dim]{escape('[ ]')}[/dim]"
+                
+                if is_highlighted:
+                    line = f"[bold yellow]> {check_char} {sch}[/bold yellow]"
+                else:
+                    line = f"  {check_char} {sch}"
+                sel_lines.append(line)
+            
+            sel_text = Text.from_markup(
+                "\n".join(sel_lines) + 
+                f"\n\n   [bold]{escape('[Enter]')} Select[/bold]   [dim]{escape('[Esc]')} Back[/dim]"
+            )
+            layout["modal_view"].update(
+                Panel(
+                    Align.left(sel_text),
+                    title="Select Schema",
+                    box=box.ROUNDED,
+                    style="yellow"
+                )
+            )
         elif active_modal == "help":
             layout["main_content"].split_row(
                 Layout(name="main_table", ratio=1),
@@ -755,6 +788,7 @@ def run_tui_dashboard_impl(
         nonlocal selected_index, filter_text, filter_focused, active_modal, write_value_buffer, paused, status_message, last_poll_time, raw_results, online, error_msg, last_successful_poll_time
         nonlocal device, engine, devices, selected_device_index, focused_panel, device_form_cursor, device_form_fields
         nonlocal previous_device_modal, register_select_list, register_select_checked, register_select_index, register_select_filter
+        nonlocal schema_select_list, schema_select_index
         nonlocal poll_updated
         
         # Start background polling loop
@@ -893,6 +927,18 @@ def run_tui_dashboard_impl(
                             if "header" not in visible_sel_regs[register_select_index]:
                                 break
 
+                elif active_modal == "select_schema":
+                    if key == "\x1b":  # Escape
+                        active_modal = previous_device_modal
+                    elif key in ("\x1b[A", "\x1bOA"):  # Up
+                        schema_select_index = max(0, schema_select_index - 1)
+                    elif key in ("\x1b[B", "\x1bOB"):  # Down
+                        schema_select_index = min(len(schema_select_list) - 1, schema_select_index + 1)
+                    elif key in ("\r", "\n"):  # Enter
+                        if schema_select_list:
+                            device_form_fields["schema_name"] = schema_select_list[schema_select_index]
+                        active_modal = previous_device_modal
+
                 elif active_modal in ("add_device", "edit_device"):
                     fields_list = ["name", "host", "port", "unit_id", "schema_name", "polling_interval", "registers"]
                     if key == "\x1b":  # Escape
@@ -907,7 +953,19 @@ def run_tui_dashboard_impl(
                         device_form_fields[field_name] = device_form_fields[field_name][:-1]
                     elif key in ("\r", "\n"):
                         field_name = fields_list[device_form_cursor]
-                        if field_name == "registers":
+                        if field_name == "schema_name":
+                            try:
+                                from modbus_schema_common.registry import get_available_schemas
+                                schema_select_list = get_available_schemas()
+                                schema_select_index = 0
+                                if device_form_fields["schema_name"] in schema_select_list:
+                                    schema_select_index = schema_select_list.index(device_form_fields["schema_name"])
+                                previous_device_modal = active_modal
+                                active_modal = "select_schema"
+                                status_message = ""
+                            except Exception as esch:
+                                status_message = f"[red]Error loading available schemas: {esch}[/red]"
+                        elif field_name == "registers":
                             # Open dynamic registers list select sub-modal
                             try:
                                 schema_name_val = device_form_fields["schema_name"].strip() or config.DEFAULT_MODBUS_SCHEMA

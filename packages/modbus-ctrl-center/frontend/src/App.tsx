@@ -239,6 +239,8 @@ export default function App() {
     fetchSuiteConfig();
   }, []);
 
+  const [availableSchemas, setAvailableSchemas] = useState<string[]>([]);
+
   const fetchSuiteConfig = async () => {
     try {
       const res = await customFetch("/api/config");
@@ -249,8 +251,13 @@ export default function App() {
           if (data.default_schema) setDefaultSchema(data.default_schema);
         }
       }
+      const schemaRes = await customFetch("/api/schemas/available");
+      if (schemaRes.ok) {
+        const schemaData = await schemaRes.json();
+        setAvailableSchemas(schemaData);
+      }
     } catch (e) {
-      console.error("Error fetching suite config:", e);
+      console.error("Error fetching suite config or schemas:", e);
     }
   };
 
@@ -678,11 +685,15 @@ export default function App() {
               </div>
               <div>
                 <label className="text-[10px] uppercase font-bold tracking-wider text-slate-500 block mb-1">Schema Name</label>
-                <input 
-                  type="text" placeholder={`Defaults to latest (${defaultSchema})`}
+                <select 
                   value={formSchema} onChange={(e) => setFormSchema(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:border-blue-500"
-                />
+                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:border-blue-500 appearance-none"
+                >
+                  <option value="">Defaults to latest ({defaultSchema})</option>
+                  {availableSchemas.map(s => (
+                    <option key={s} value={s}>{s}</option>
+                  ))}
+                </select>
               </div>
               <div>
                 <label className="text-[10px] uppercase font-bold tracking-wider text-slate-500 block mb-1">Poll Interval (s)</label>

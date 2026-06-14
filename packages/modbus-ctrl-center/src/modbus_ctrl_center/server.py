@@ -342,6 +342,15 @@ async def get_device_schema(name: str):
         raise HTTPException(status_code=500, detail=f"Could not load schema: {e}")
 
 
+@app.get("/api/schemas/available")
+async def get_available_schemas_list():
+    try:
+        from modbus_schema_common.registry import get_available_schemas
+        return get_available_schemas()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to load available schemas: {e}")
+
+
 @app.get("/api/schemas/{schema_name}")
 async def get_schema_by_name(schema_name: str):
     """Resolve and return a schema specification directly by its schema name (e.g. v20, v30)."""

@@ -2,7 +2,7 @@ devices:
 - name: SimDevice
   host: 127.0.0.1
   port: 5025
-  schema_name: v10
+  schema_name: modbus_config/latest
   registers:
   - SystemOn
   - SystemOff
