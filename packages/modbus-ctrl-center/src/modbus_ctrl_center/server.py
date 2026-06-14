@@ -11,7 +11,8 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
-from modbus_ctrl_contracts import AppConfig, DeviceConfig, WriteBatchRequest, TelemetryDeltaResponse
+from modbus_common import AppConfig, DeviceConfig
+from modbus_ctrl_contracts import WriteBatchRequest, TelemetryDeltaResponse
 from modbus_ctrl_core import ModbusControlEngine, resolve_schema, config
 import typer
 

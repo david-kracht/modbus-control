@@ -137,13 +137,17 @@ version = "0.1.0"
 source = { editable = "../efoy-modbus-config/packages/modbus-common" }
 dependencies = [
     { name = "modbus-schema-common" },
+    { name = "pydantic" },
     { name = "pymodbus" },
+    { name = "pyyaml" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "modbus-schema-common", editable = "../efoy-modbus-config/packages/modbus-schema-common" },
-    { name = "pymodbus", specifier = ">=3.6.8" },
+    { name = "pydantic", specifier = ">=2.0" },
+    { name = "pymodbus", specifier = ">=3.8.0" },
+    { name = "pyyaml", specifier = ">=6.0.0" },
 ]
 
 [[package]]

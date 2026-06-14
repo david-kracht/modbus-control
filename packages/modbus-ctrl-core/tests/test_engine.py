@@ -1,4 +1,4 @@
-from modbus_ctrl_contracts import DeviceConfig
+from modbus_common import DeviceConfig
 from modbus_ctrl_core import ModbusControlEngine
 
 def test_engine_register_filtering():
@@ -56,7 +56,7 @@ def test_app_config_load_corrupted_yaml():
     import pytest
     import tempfile
     from pathlib import Path
-    from modbus_ctrl_contracts import AppConfig
+    from modbus_common import AppConfig
 
     yaml_content = """
 devices:

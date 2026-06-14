@@ -22,7 +22,7 @@ from rich.align import Align
 from rich import box
 from rich.markup import escape
 
-from modbus_ctrl_contracts import AppConfig, DeviceConfig
+from modbus_common import AppConfig, DeviceConfig
 from modbus_ctrl_core import ModbusControlEngine, resolve_schema, config
 from modbus_schema_common.models import ModbusRegisterType
 

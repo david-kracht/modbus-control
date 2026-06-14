@@ -9,7 +9,7 @@ from modbus_schema_common.models import (
     ModbusRegisterBase,
     ModbusRegisterType,
 )
-from modbus_ctrl_contracts import DeviceConfig
+from modbus_common import DeviceConfig
 from modbus_common.client import ModbusClientWrapper
 from modbus_common.aggregator import build_read_blocks, ReadBlock
 from modbus_common import translator
