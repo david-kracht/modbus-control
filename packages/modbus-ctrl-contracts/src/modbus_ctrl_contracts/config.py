@@ -3,23 +3,14 @@ from pathlib import Path
 from typing import Optional, Any
 from pydantic import BaseModel, Field, model_validator, model_serializer, ValidationError
 
-def get_latest_schema() -> str:
-    try:
-        from modbus_schema_common.registry import get_registry
-        registry = get_registry("modbus_config")
-        vers = registry.versions()
-        if vers:
-            return vers[-1]
-    except Exception:
-        pass
-    return "v10"
+from modbus_config import latest_version
 
 class DeviceConfig(BaseModel):
     name: Optional[str] = Field(None, description="Unique name of the Modbus device")
     host: str = Field(..., description="IP address or host name")
     port: int = Field(502, description="Modbus TCP port")
     unit_id: int = Field(1, description="Modbus Slave Unit ID")
-    schema_name: str = Field(default_factory=get_latest_schema, description="Schema version name")
+    schema_name: str = Field(default_factory=latest_version, description="Schema version name")
     polling_interval: float = Field(1.0, description="Polling interval in seconds")
     active: bool = Field(True, description="Whether polling is active for this device")
     registers: Optional[list[str]] = Field(None, description="Optional list of registers to query and display, in specific order")

@@ -309,7 +309,7 @@ def device_edit(
                 current_regs = list(add_list)
             if remove_list:
                 try:
-                    schema_to_use = current_data.get("schema_name") or "v10"
+                    schema_to_use = current_data.get("schema_name") or config.DEFAULT_MODBUS_SCHEMA
                     spec = resolve_schema(schema_to_use)
                     all_regs = [r.name for r in spec.registers]
                     current_regs = [r for r in all_regs if r not in remove_list]

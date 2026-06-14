@@ -166,7 +166,7 @@ cli_app = typer.Typer(help=f"{config.SUITE_TITLE} - Mock Simulator Server")
 
 @cli_app.callback(invoke_without_command=True)
 def main_cli(
-    schema: Optional[str] = typer.Option(None, "--schema", help="Schema key or path (e.g. v10, v20, v30)"),
+    schema: Optional[str] = typer.Option(None, "--schema", help=f"Schema key or path (defaults to {config.SIM_SCHEMA})"),
     host: Optional[str] = typer.Option(None, "--host", help="Host to listen on"),
     port: Optional[int] = typer.Option(None, "--port", help="Port to listen on"),
 ):

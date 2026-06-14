@@ -4,8 +4,5 @@ devices:
   port: 5025
   schema_name: v10
   registers:
-  - LogSystemOffOk
-  - LogSystemOnOk
-  - SystemType
-  - CurrentErrorActive
-  - BatIdConfig
+  - SystemOn
+  - SystemOff

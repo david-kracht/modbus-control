@@ -214,6 +214,7 @@ app.add_middleware(
 async def get_suite_config():
     return {
         "suite_title": config.SUITE_TITLE,
+        "default_schema": config.DEFAULT_MODBUS_SCHEMA,
     }
 
 
@@ -343,7 +344,7 @@ async def get_device_schema(name: str):
 
 @app.get("/api/schemas/{schema_name}")
 async def get_schema_by_name(schema_name: str):
-    """Resolve and return a schema specification directly by its schema name (e.g. v10, v20)."""
+    """Resolve and return a schema specification directly by its schema name (e.g. v20, v30)."""
     try:
         spec = resolve_schema(schema_name)
         return spec

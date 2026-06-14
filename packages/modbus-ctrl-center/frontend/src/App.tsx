@@ -65,6 +65,7 @@ const customFetch = (input: RequestInfo | URL, init?: RequestInit) => {
 
 export default function App() {
   const [suiteTitle, setSuiteTitle] = useState<string>("Modbus Control Suite");
+  const [defaultSchema, setDefaultSchema] = useState<string>("");
   const [logoFailed, setLogoFailed] = useState<boolean>(false);
 
   // Device list and active device selection
@@ -110,7 +111,7 @@ export default function App() {
       setAvailableSchemaRegisters([]);
       return;
     }
-    const schemaToFetch = formSchema.trim() || "v10";
+    const schemaToFetch = formSchema.trim() || defaultSchema;
     const fetchFormSchema = async () => {
       try {
         const res = await customFetch(`/api/schemas/${schemaToFetch}`);
@@ -243,8 +244,9 @@ export default function App() {
       const res = await customFetch("/api/config");
       if (res.ok) {
         const data = await res.json();
-        if (data && data.suite_title) {
-          setSuiteTitle(data.suite_title);
+        if (data) {
+          if (data.suite_title) setSuiteTitle(data.suite_title);
+          if (data.default_schema) setDefaultSchema(data.default_schema);
         }
       }
     } catch (e) {
@@ -677,7 +679,7 @@ export default function App() {
               <div>
                 <label className="text-[10px] uppercase font-bold tracking-wider text-slate-500 block mb-1">Schema Name</label>
                 <input 
-                  type="text" placeholder="Defaults to latest (v30)"
+                  type="text" placeholder={`Defaults to latest (${defaultSchema})`}
                   value={formSchema} onChange={(e) => setFormSchema(e.target.value)}
                   className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:border-blue-500"
                 />

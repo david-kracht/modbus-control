@@ -5,6 +5,10 @@ from modbus_schema_common.models import ModbusRegisterBase, ModbusRegisterType
 logger = logging.getLogger(__name__)
 
 class ReadBlock(TypedDict):
+    """
+    Represents a contiguous block of Modbus registers that can be read in a single network request.
+    This optimizes communication by minimizing protocol overhead.
+    """
     register_type: ModbusRegisterType
     start_addr: int
     count: int

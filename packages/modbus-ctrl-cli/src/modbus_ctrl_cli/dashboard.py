@@ -37,16 +37,36 @@ class RawTerminal:
     def __exit__(self, type, value, traceback):
         termios.tcsetattr(sys.stdin, termios.TCSADRAIN, self.old_settings)
 
+_key_queue = []
+
 def get_key(timeout=0.05) -> str:
-    fd = sys.stdin.fileno()
-    rlist, _, _ = select.select([fd], [], [], timeout)
-    if rlist:
-        try:
-            # Bypasses python text-stream buffering completely to read escape sequences atomically
-            data = os.read(fd, 10)
-            return data.decode('utf-8', errors='ignore')
-        except Exception:
-            return ""
+    global _key_queue
+    if not _key_queue:
+        fd = sys.stdin.fileno()
+        rlist, _, _ = select.select([fd], [], [], timeout)
+        if rlist:
+            try:
+                data = os.read(fd, 1024)
+                text = data.decode('utf-8', errors='ignore')
+                i = 0
+                while i < len(text):
+                    if text[i] == '\x1b':
+                        if i + 5 < len(text) and text[i:i+6] in ('\x1b[1;2A', '\x1b[1;2B'):
+                            _key_queue.append(text[i:i+6])
+                            i += 6
+                        elif i + 2 < len(text) and text[i+1] in ('[', 'O'):
+                            _key_queue.append(text[i:i+3])
+                            i += 3
+                        else:
+                            _key_queue.append(text[i])
+                            i += 1
+                    else:
+                        _key_queue.append(text[i])
+                        i += 1
+            except Exception:
+                pass
+    if _key_queue:
+        return _key_queue.pop(0)
     return ""
 
 def parse_ordinal_value(val_str: str) -> float | int:
@@ -148,6 +168,22 @@ def run_tui_dashboard_impl(
     timezone: str = "UTC",
     time_format: str = "%Y-%m-%d %H:%M:%S",
 ):
+    """
+    Initializes and runs the rich-based Terminal User Interface (TUI) for the Modbus dashboard.
+    
+    This function handles the main event loop, layout building, asynchronous polling 
+    tasks, and keyboard event processing to provide an interactive dashboard.
+    
+    Args:
+        target: Optional name or index of a pre-configured device in devices.yaml.
+        host: Optional override for the Modbus IP address.
+        port: Optional override for the Modbus Port.
+        unit_id: Optional override for the Modbus Unit ID (Slave ID).
+        schema: Optional override for the schema package/version to use.
+        interval: Polling interval in seconds if not defined by the device.
+        timezone: Timezone for the display clock (e.g., "UTC" or "local").
+        time_format: Display format for the clock.
+    """
     try:
         if timezone.lower() == "local":
             tz = None
@@ -211,7 +247,7 @@ def run_tui_dashboard_impl(
     active_modal = None  # None, "write", "add_device", "edit_device", "select_registers", "help"
     previous_device_modal = None
     write_value_buffer = ""
-    device_form_fields = {"name": "", "host": "", "port": "502", "unit_id": "1", "schema_name": "v10", "polling_interval": "1.0", "registers": ""}
+    device_form_fields = {"name": "", "host": "", "port": "502", "unit_id": "1", "schema_name": config.DEFAULT_MODBUS_SCHEMA, "polling_interval": "1.0", "registers": ""}
     device_form_cursor = 0
     paused = False
     status_message = ""
@@ -323,6 +359,7 @@ def run_tui_dashboard_impl(
         start_polling()
 
     def update_tui(filtered_regs):
+        nonlocal register_select_index
         # Header Panel
         if last_successful_poll_time is None:
             poll_time_part = "never"
@@ -353,7 +390,7 @@ def run_tui_dashboard_impl(
         if show_sidebar:
             layout["body"].split_row(
                 Layout(name="devices_sidebar", ratio=1),
-                Layout(name="main_content", ratio=5)
+                Layout(name="main_content", ratio=8)
             )
         else:
             layout["body"].split_row(
@@ -386,7 +423,7 @@ def run_tui_dashboard_impl(
                     display_val = val
 
                 if is_field_focused:
-                    form_lines.append(f"[bold yellow]> {label}: {escape('[')} [bold green]{display_val}[/bold green]▎ {escape(']')}[/bold yellow]")
+                    form_lines.append(f"[bold yellow]> {label}: [bold green]{display_val}[/bold green]▎[/bold yellow]")
                 else:
                     form_lines.append(f"  {label}: {display_val}")
             
@@ -406,7 +443,37 @@ def run_tui_dashboard_impl(
                 Layout(name="modal_view", ratio=3)
             )
             # Render multi-select registers viewport list
-            visible_sel_regs = [r for r in register_select_list if register_select_filter in r]
+            schema_dict = {r["name"]: r for r in register_select_list}
+            selected_items = []
+            for name in register_select_checked:
+                if name in schema_dict:
+                    selected_items.append(schema_dict[name])
+            
+            unselected_items = [r for r in register_select_list if r["name"] not in register_select_checked]
+            
+            # Add section headers
+            all_items = []
+            if selected_items:
+                all_items.append({"header": "Selected Registers"})
+                all_items.extend(selected_items)
+            if unselected_items:
+                all_items.append({"header": "Available Registers"})
+                all_items.extend(unselected_items)
+                
+            visible_sel_regs = []
+            for item in all_items:
+                if "header" in item:
+                    visible_sel_regs.append(item)
+                elif register_select_filter in item["name"]:
+                    visible_sel_regs.append(item)
+                    
+            # Ensure index does not rest on a header
+            if visible_sel_regs and "header" in visible_sel_regs[register_select_index % len(visible_sel_regs)]:
+                for _ in range(len(visible_sel_regs)):
+                    register_select_index = (register_select_index + 1) % len(visible_sel_regs)
+                    if "header" not in visible_sel_regs[register_select_index]:
+                        break
+                        
             total_sel = len(visible_sel_regs)
             
             max_sel_rows = max(5, console_output.height - 10)
@@ -423,20 +490,31 @@ def run_tui_dashboard_impl(
                 sel_title = f"Select Registers ({total_sel})"
                 
             sel_lines = []
-            sel_lines.append(f"🔍 Search: {escape('[')} [bold white]{register_select_filter}[/bold white]▎ {escape(']')}")
+            sel_lines.append(f"🔍 Search: [bold white]{register_select_filter}[/bold white]▎ (Shift+Up/Down to reorder)")
             sel_lines.append("")
             
-            for s_offset, rname in enumerate(sliced_sel):
+            for s_offset, item in enumerate(sliced_sel):
                 s_idx = sel_start + s_offset
                 is_highlighted = (s_idx == register_select_index)
+                
+                if "header" in item:
+                    line = f"[bold cyan]--- {item['header']} ---[/bold cyan]"
+                    if is_highlighted:
+                        line = f"[bold yellow]> {line}[/bold yellow]"
+                    sel_lines.append(line)
+                    continue
+                    
+                rname = item["name"]
+                raddr = item["addr"]
                 is_checked = rname in register_select_checked
                 
                 check_char = f"✨ [bold yellow]{escape('[x]')}[/bold yellow]" if is_checked else f"  [dim]{escape('[ ]')}[/dim]"
+                display_text = f"{rname} ({raddr})"
                 
                 if is_highlighted:
-                    line = f"[bold yellow]> {check_char} {rname}[/bold yellow]"
+                    line = f"[bold yellow]> {check_char} {display_text}[/bold yellow]"
                 else:
-                    line = f"  {check_char} {rname}"
+                    line = f"  {check_char} {display_text}"
                 sel_lines.append(line)
                 
             sel_text = Text.from_markup(
@@ -497,7 +575,7 @@ def run_tui_dashboard_impl(
                 Text.from_markup(f"Name: [bold cyan]{selected_reg.name}[/bold cyan]\n"),
                 Text.from_markup(f"Addr: [yellow]{selected_reg.address_dec}[/yellow] ({selected_reg.register_type.value})\n\n"),
                 Text.from_markup(f"Current Value: [bold]{raw_results.get(selected_reg.name, 'N/A')}[/bold]\n\n"),
-                Text.from_markup(f"New Value: {escape('[')} [bold green]{write_value_buffer}[/bold green]▎ {escape(']')}\n\n\n"),
+                Text.from_markup(f"New Value: [bold green]{write_value_buffer}[/bold green]▎\n\n\n"),
                 Text.from_markup(f"   [bold]{escape('[Enter]')} Stage[/bold]    [dim]{escape('[Esc]')} Cancel[/dim]")
             ]
             layout["modal_view"].update(
@@ -728,33 +806,92 @@ def run_tui_dashboard_impl(
                         filter_text += key
 
                 elif active_modal == "select_registers":
-                    visible_sel_regs = [r for r in register_select_list if register_select_filter in r]
+                    schema_dict = {r["name"]: r for r in register_select_list}
+                    selected_items = []
+                    for name in register_select_checked:
+                        if name in schema_dict:
+                            selected_items.append(schema_dict[name])
+                    unselected_items = [r for r in register_select_list if r["name"] not in register_select_checked]
                     
+                    all_items = []
+                    if selected_items:
+                        all_items.append({"header": "Selected Registers"})
+                        all_items.extend(selected_items)
+                    if unselected_items:
+                        all_items.append({"header": "Available Registers"})
+                        all_items.extend(unselected_items)
+                        
+                    visible_sel_regs = []
+                    for item in all_items:
+                        if "header" in item:
+                            visible_sel_regs.append(item)
+                        elif register_select_filter in item["name"]:
+                            visible_sel_regs.append(item)
+                            
+                    # Ensure index does not rest on a header
+                    if visible_sel_regs and "header" in visible_sel_regs[register_select_index % len(visible_sel_regs)]:
+                        for _ in range(len(visible_sel_regs)):
+                            register_select_index = (register_select_index + 1) % len(visible_sel_regs)
+                            if "header" not in visible_sel_regs[register_select_index]:
+                                break
+                            
                     if key == "\x1b":  # Escape
                         active_modal = previous_device_modal
                     elif key in ("\x1b[A", "\x1bOA"):  # Up
                         if visible_sel_regs:
-                            register_select_index = (register_select_index - 1) % len(visible_sel_regs)
+                            for _ in range(len(visible_sel_regs)):
+                                register_select_index = (register_select_index - 1) % len(visible_sel_regs)
+                                if "header" not in visible_sel_regs[register_select_index]:
+                                    break
                     elif key in ("\x1b[B", "\x1bOB"):  # Down
                         if visible_sel_regs:
-                            register_select_index = (register_select_index + 1) % len(visible_sel_regs)
+                            for _ in range(len(visible_sel_regs)):
+                                register_select_index = (register_select_index + 1) % len(visible_sel_regs)
+                                if "header" not in visible_sel_regs[register_select_index]:
+                                    break
+                    elif key == "\x1b[1;2A":  # Shift+Up
+                        if visible_sel_regs:
+                            item = visible_sel_regs[register_select_index]
+                            if "name" in item and item["name"] in register_select_checked:
+                                rname = item["name"]
+                                idx = register_select_checked.index(rname)
+                                if idx > 0:
+                                    register_select_checked[idx], register_select_checked[idx-1] = register_select_checked[idx-1], register_select_checked[idx]
+                                    register_select_index -= 1
+                    elif key == "\x1b[1;2B":  # Shift+Down
+                        if visible_sel_regs:
+                            item = visible_sel_regs[register_select_index]
+                            if "name" in item and item["name"] in register_select_checked:
+                                rname = item["name"]
+                                idx = register_select_checked.index(rname)
+                                if idx < len(register_select_checked) - 1:
+                                    register_select_checked[idx], register_select_checked[idx+1] = register_select_checked[idx+1], register_select_checked[idx]
+                                    register_select_index += 1
                     elif key == " ":  # Space (Toggle Checkbox)
                         if visible_sel_regs:
-                            rname = visible_sel_regs[register_select_index]
-                            if rname in register_select_checked:
-                                register_select_checked.remove(rname)
-                            else:
-                                register_select_checked.add(rname)
+                            item = visible_sel_regs[register_select_index]
+                            if "name" in item:
+                                rname = item["name"]
+                                if rname in register_select_checked:
+                                    register_select_checked.remove(rname)
+                                else:
+                                    register_select_checked.append(rname)
                     elif key in ("\x7f", "\x08"):  # Backspace
                         register_select_filter = register_select_filter[:-1]
                         register_select_index = 0
-                    elif key in ("\r", "\n"):  # Enter
-                        ordered_selected = [r for r in register_select_list if r in register_select_checked]
-                        device_form_fields["registers"] = ", ".join(ordered_selected)
-                        active_modal = previous_device_modal
-                    elif len(key) == 1 and key.isprintable():
+                    elif len(key) == 1 and key.isprintable() and key != " ":
                         register_select_filter += key
                         register_select_index = 0
+                    elif key in ("\r", "\n"):  # Enter
+                        device_form_fields["registers"] = ", ".join(register_select_checked)
+                        active_modal = previous_device_modal
+                    
+                    # Ensure index is not on a header after filter change or open
+                    if visible_sel_regs and "header" in visible_sel_regs[register_select_index % len(visible_sel_regs)]:
+                        for _ in range(len(visible_sel_regs)):
+                            register_select_index = (register_select_index + 1) % len(visible_sel_regs)
+                            if "header" not in visible_sel_regs[register_select_index]:
+                                break
 
                 elif active_modal in ("add_device", "edit_device"):
                     fields_list = ["name", "host", "port", "unit_id", "schema_name", "polling_interval", "registers"]
@@ -773,13 +910,13 @@ def run_tui_dashboard_impl(
                         if field_name == "registers":
                             # Open dynamic registers list select sub-modal
                             try:
-                                schema_name_val = device_form_fields["schema_name"].strip() or "v10"
+                                schema_name_val = device_form_fields["schema_name"].strip() or config.DEFAULT_MODBUS_SCHEMA
                                 spec = resolve_schema(schema_name_val)
-                                register_select_list = [r.name for r in spec.registers]
-                                register_select_checked = set()
+                                register_select_list = [{"name": r.name, "addr": r.address_dec} for r in spec.registers]
+                                register_select_checked = []
                                 cur_regs_str = device_form_fields["registers"].strip()
                                 if cur_regs_str:
-                                    register_select_checked = {r.strip() for r in cur_regs_str.split(",") if r.strip()}
+                                    register_select_checked = [r.strip() for r in cur_regs_str.split(",") if r.strip()]
                                 register_select_index = 0
                                 register_select_filter = ""
                                 previous_device_modal = active_modal
@@ -824,7 +961,7 @@ def run_tui_dashboard_impl(
                                 if registers_val:
                                     regs_list = [r.strip() for r in registers_val.split(",") if r.strip()]
                                 else:
-                                    regs_list = None
+                                    regs_list = []
 
                                 temp_dev = DeviceConfig(
                                     name=name_val,
@@ -901,7 +1038,7 @@ def run_tui_dashboard_impl(
                     # Add Device
                     elif key == "n" and show_sidebar:
                         active_modal = "add_device"
-                        device_form_fields = {"name": "", "host": "", "port": "502", "unit_id": "1", "schema_name": "v10", "polling_interval": "1.0", "registers": ""}
+                        device_form_fields = {"name": "", "host": "", "port": "502", "unit_id": "1", "schema_name": config.DEFAULT_MODBUS_SCHEMA, "polling_interval": "1.0", "registers": ""}
                         device_form_cursor = 0
                         status_message = ""
                     
@@ -916,7 +1053,7 @@ def run_tui_dashboard_impl(
                                 "host": cur_dev.host or "",
                                 "port": str(cur_dev.port),
                                 "unit_id": str(cur_dev.unit_id),
-                                "schema_name": cur_dev.schema_name or "v10",
+                                "schema_name": cur_dev.schema_name or config.DEFAULT_MODBUS_SCHEMA,
                                 "polling_interval": str(cur_dev.polling_interval),
                                 "registers": ", ".join(cur_dev.registers) if cur_dev.registers else "",
                             }
@@ -1000,7 +1137,7 @@ def run_tui_dashboard_impl(
                             status_message = "[grey]No staged changes to discard[/grey]"
 
                     # Up Navigation
-                    elif key in ("\x1b[A", "\x1bOA", "w", "k"):
+                    elif key in ("\x1b[A", "\x1bOA"):
                         if focused_panel == "devices" and devices:
                             new_idx = max(0, selected_device_index - 1)
                             select_device(new_idx)
@@ -1009,7 +1146,7 @@ def run_tui_dashboard_impl(
                         status_message = ""
 
                     # Down Navigation
-                    elif key in ("\x1b[B", "\x1bOB", "s", "j"):
+                    elif key in ("\x1b[B", "\x1bOB"):
                         if focused_panel == "devices" and devices:
                             new_idx = min(len(devices) - 1, selected_device_index + 1)
                             select_device(new_idx)

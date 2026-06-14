@@ -55,8 +55,8 @@ uv sync --all-packages
 
 ### 2. Run Simulator
 ```bash
-# Start mock simulator (loads schema v10, binds to port 5025)
-uv run modbus-sim --schema v10 --port 5025
+# Start mock simulator (loads latest schema, binds to port 5025)
+uv run modbus-sim --schema v30 --port 5025
 ```
 
 ### 3. Run Control Center (API Backend & UI)
@@ -73,7 +73,7 @@ Open 👉 **[http://localhost:8000/docs](http://localhost:8000/docs)** to access
 ### 4. Use CLI (`modbus-ctrl`)
 ```bash
 # Add device to devices.yaml
-uv run modbus-ctrl device add 127.0.0.1 --name "Device1" --port 5025 --schema v10
+uv run modbus-ctrl device add 127.0.0.1 --name "Device1" --port 5025 --schema v30
 
 # Read registers (Fuzzy name and address matches supported)
 uv run modbus-ctrl read "BatIdConfig" --target Device1
@@ -82,7 +82,7 @@ uv run modbus-ctrl read "BatIdConfig" --target Device1
 uv run modbus-ctrl write "BatIdConfig" "1" --target Device1
 
 # Ad-hoc query (No devices.yaml needed, falls back to env defaults)
-uv run modbus-ctrl read "BatIdConfig" --host 127.0.0.1 --port 5025 --schema v10
+uv run modbus-ctrl read "BatIdConfig" --host 127.0.0.1 --port 5025 --schema v30
 ```
 
 ---
