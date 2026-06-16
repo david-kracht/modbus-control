@@ -47,11 +47,6 @@ class ModbusControlEngine:
             r.address_dec: r for r in self.schema.registers
         }
 
-    def _proto(self, schema_addr: int) -> int:
-        """Schema address → 0-based protocol address via schema.address_mask."""
-        m = self.schema.address_mask
-        return (schema_addr - 1) % m if m else schema_addr
-
     async def read_all(self, gap_threshold: int = 5) -> dict[str, Any]:
         """Read all configured registers and return name → value dict."""
         self.newly_failed_registers = set()
@@ -71,7 +66,7 @@ class ModbusControlEngine:
             count = block["count"]
             rtype = block["register_type"]
             slave = self.device.unit_id
-            proto_start = self._proto(start)
+            proto_start = block["registers"][0].protocol_address_dec
 
             logger.debug(
                 "Reading block: %s[%d:%d] proto=%d",
@@ -148,7 +143,7 @@ class ModbusControlEngine:
     ) -> None:
         """Fallback: read each register individually."""
         for reg in registers:
-            proto_start = self._proto(reg.address_dec)
+            proto_start = reg.protocol_address_dec
             count = reg.register_count
             try:
                 res = await self._fc_read(rtype, proto_start, count, slave)
@@ -219,7 +214,7 @@ class ModbusControlEngine:
                 continue
 
             try:
-                proto_addr = self._proto(reg.address_dec)
+                proto_addr = reg.protocol_address_dec
                 c = self.client.client
                 if rtype == ModbusRegisterType.COIL:
                     res = await c.write_coil(

@@ -27,12 +27,6 @@ DEFAULT_POLLING_INTERVAL: float = float(
     os.getenv("DEFAULT_POLLING_INTERVAL", "1.0")
 )
 
-# Maximum concurrent TCP connections per device (1–6).
-# Prevents overloading devices that limit simultaneous connections.
-MAX_CONNECTIONS_PER_DEVICE: int = max(
-    1, min(6, int(os.getenv("MAX_CONNECTIONS_PER_DEVICE", "3")))
-)
-
 # Customization Settings
 SUITE_TITLE: str = os.getenv("SUITE_TITLE", "Modbus Control Suite")
 SUITE_LOGO_PATH: str = os.getenv("SUITE_LOGO_PATH", "")

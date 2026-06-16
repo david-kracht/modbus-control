@@ -561,7 +561,7 @@ def read_registers(
     enum_mode: str = typer.Option("ordinal", help="Enum formatting: literal (string), ordinal (number)"),
     show_time: bool = typer.Option(True, "--time/--no-time", help="Include timestamp in the output"),
     time_format: str = typer.Option("%Y-%m-%d %H:%M:%S.%f", "--time-format", help="Timestamp format string"),
-    timezone: str = typer.Option("UTC", "--timezone", help="Timezone for the timestamp (e.g. UTC, local, Europe/Berlin)"),
+    timezone: str = typer.Option("local", "--timezone", help="Timezone for the timestamp (e.g. UTC, local, Europe/Berlin)"),
     interval: Optional[float] = typer.Option(None, "--interval", help="Continuously read registers every N seconds"),
     delimiter: str = typer.Option(";", "--delimiter", help="CSV field delimiter", rich_help_panel="CSV Options"),
     vertical: bool = typer.Option(False, "--vertical/--horizontal", help="Output layout orientation", rich_help_panel="CSV Options"),
@@ -970,7 +970,7 @@ def run_tui_dashboard(
     unit_id: Optional[int] = typer.Option(None, help="Ad-hoc Slave Unit ID override"),
     schema: Optional[str] = typer.Option(None, help="Ad-hoc schema override"),
     interval: float = typer.Option(1.0, "--interval", help="Refresh interval in seconds"),
-    timezone: str = typer.Option("UTC", "--timezone", help="Timezone for the timestamp (e.g. UTC, local, Europe/Berlin)"),
+    timezone: str = typer.Option("local", "--timezone", help="Timezone for the timestamp (e.g. UTC, local, Europe/Berlin)"),
     time_format: str = typer.Option("%Y-%m-%d %H:%M:%S", "--time-format", help="Timestamp format string"),
 ):
     """Monitor register values in real-time with an interactive TUI dashboard."""

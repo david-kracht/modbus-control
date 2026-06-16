@@ -6,10 +6,11 @@ A modular, schema-driven monorepo workspace for simulating, monitoring, controll
 
 ## Architecture & Services
 
-The suite consists of three core components:
-1. **Mock Simulator (`modbus-sim`)**: Emulates live Modbus TCP server endpoints based on schema templates.
-2. **Control Center Backend (`modbus-ctrl-center`)**: FastAPI server managing device database (`devices.yaml`), websocket telemetry delta streams, and serving the static React SPA frontend.
-3. **Control CLI (`modbus-ctrl`)**: CLI tool for device management and ad-hoc register reads/writes.
+The suite consists of two core control components and integrates with a standalone simulator:
+1. **Control Center Backend (`modbus-ctrl-center`)**: FastAPI server managing device database (`devices.yaml`), websocket telemetry delta streams, and serving the static React SPA frontend.
+2. **Control CLI (`modbus-ctrl`)**: CLI tool for device management and ad-hoc register reads/writes.
+
+*Note:* The **Mock Simulator (`modbus-sim`)** has been extracted to the upstream schema registry repository (`efoy-modbus-config`) as it relies heavily on the `modbus-schema-common` parser.
 
 ---
 ## Configuration
@@ -55,7 +56,7 @@ uv sync --all-packages
 
 ### 2. Run Simulator
 ```bash
-# Start mock simulator (loads latest schema, binds to port 5025)
+# Start mock simulator (requires modbus-simulator installed, e.g. from efoy-modbus-config)
 uv run modbus-sim --schema v30 --port 5025
 ```
 
@@ -134,8 +135,8 @@ The CLI and services can be installed on client machines as isolated, standalone
 # Install CLI tool
 uv tool install modbus-ctrl-cli --index https://your-custom-registry.com/repository/pypi/simple
 
-# Install and run services on-the-fly (e.g. running simulator without installing)
-uvx --index https://your-custom-registry.com/repository/pypi/simple modbus-sim --port 5025
+# Install and run services on-the-fly
+uvx --index https://your-custom-registry.com/repository/pypi/simple modbus-ctrl-center
 ```
 *No system package dependencies or manual virtualenv steps are needed.*
 
@@ -143,8 +144,8 @@ uvx --index https://your-custom-registry.com/repository/pypi/simple modbus-sim -
 
 ### 4. Release & Update Workflows
 
-#### Case A: Core/CLI/Simulator Implementation Changes
-When modifying application code (e.g. backend server, CLI layout, simulator features):
+#### Case A: Core/CLI Implementation Changes
+When modifying application code (e.g. backend server, CLI layout):
 1. Make your changes in the respective package.
 2. Bump the package version in its `pyproject.toml` (e.g., `modbus-ctrl-center` version `0.1.0` -> `0.1.1`).
 3. Rebuild and publish the updated package: `uv build -p modbus-ctrl-center && uv publish`.

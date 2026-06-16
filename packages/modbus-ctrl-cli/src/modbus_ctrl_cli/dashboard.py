@@ -180,7 +180,7 @@ def run_tui_dashboard_impl(
     unit_id: Optional[int] = None,
     schema: Optional[str] = None,
     interval: float = 1.0,
-    timezone: str = "UTC",
+    timezone: str = "local",
     time_format: str = "%Y-%m-%d %H:%M:%S",
 ):
     """
@@ -1447,21 +1447,30 @@ def run_tui_dashboard_impl(
                                     [(int(k), v) for k, v in selected_reg.enum_values.items()],
                                     key=lambda x: x[0]
                                 )
-                                write_enum_index = 0
-                                write_enum_selected = None
-                                if not is_holding_register_sentinel(
-                                    cur_val, selected_reg.data_type
-                                ):
-                                    try:
-                                        cur_code = int(cur_val)
-                                        for _ei, (_ec, _) in enumerate(write_enum_options):
-                                            if _ec == cur_code:
-                                                write_enum_index = _ei
-                                                write_enum_selected = cur_code
-                                                break
-                                    except (TypeError, ValueError):
-                                        pass
-                                active_modal = "write_enum"
+                                if not write_enum_options:
+                                    # Fallback if somehow enum is empty
+                                    write_value_buffer = ""
+                                    if not is_holding_register_sentinel(
+                                        cur_val, selected_reg.data_type
+                                    ):
+                                        write_value_buffer = str(cur_val)
+                                    active_modal = "write"
+                                else:
+                                    write_enum_index = 0
+                                    write_enum_selected = None
+                                    if not is_holding_register_sentinel(
+                                        cur_val, selected_reg.data_type
+                                    ):
+                                        try:
+                                            cur_code = int(cur_val)
+                                            for _ei, (_ec, _) in enumerate(write_enum_options):
+                                                if _ec == cur_code:
+                                                    write_enum_index = _ei
+                                                    write_enum_selected = cur_code
+                                                    break
+                                        except (TypeError, ValueError):
+                                            pass
+                                    active_modal = "write_enum"
                             else:
                                 # Numeric/text register: open free-text modal
                                 write_value_buffer = ""
