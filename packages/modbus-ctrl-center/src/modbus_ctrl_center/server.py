@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import math
 import os
 import time
 from contextlib import asynccontextmanager
@@ -26,10 +27,20 @@ def get_devices_yaml_path() -> Path:
 
 # Global caches and tasks
 active_websockets: Set[WebSocket] = set()
-device_caches: Dict[str, Dict[str, Any]] = {}  # device_name -> cached_register_values
-polling_tasks: Dict[str, asyncio.Task] = {}     # device_name -> polling task
-device_status: Dict[str, Dict[str, Any]] = {}   # device_name -> {online, last_poll, error}
-unsupported_registers: Dict[str, Set[str]] = {} # device_name -> set of unsupported register names
+device_caches: Dict[str, Dict[str, Any]] = {}
+polling_tasks: Dict[str, asyncio.Task] = {}
+device_status: Dict[str, Dict[str, Any]] = {}
+unsupported_registers: Dict[str, Set[str]] = {}
+# Per-device semaphore: limits concurrent TCP connections to MAX_CONNECTIONS_PER_DEVICE
+device_semaphores: Dict[str, asyncio.Semaphore] = {}
+
+
+def _get_semaphore(device_name: str) -> asyncio.Semaphore:
+    if device_name not in device_semaphores:
+        device_semaphores[device_name] = asyncio.Semaphore(
+            config.MAX_CONNECTIONS_PER_DEVICE
+        )
+    return device_semaphores[device_name]
 
 
 async def _broadcast(payload: str):
@@ -60,68 +71,114 @@ async def update_device_values_and_broadcast(device_name: str, new_vals: dict[st
             deltas=deltas
         )
         await _broadcast(msg.model_dump_json())
-        logger.info("Broadcasting delta update for %s: %s", device_name, deltas)
+        logger.debug("Broadcasting delta update for %s: %s", device_name, deltas)
 
 
 async def poll_device(device_name: str):
     """Background loop polling a device and broadcasting deltas via WebSockets."""
     logger.info("Starting polling loop for device: %s", device_name)
-    cache = device_caches.setdefault(device_name, {})
+    device_caches.setdefault(device_name, {})
+    engine: Optional[ModbusControlEngine] = None
+    current_host: Optional[str] = None
+    current_port: Optional[int] = None
 
-    while True:
-        try:
-            # Load configuration dynamically to respect changes (interval, active status, host)
-            config_path = get_devices_yaml_path()
-            app_config = AppConfig.load_from_yaml(config_path)
-            device = next((d for d in app_config.devices if d.name == device_name), None)
+    try:
+        while True:
+            try:
+                # Reload config each iteration to pick up interval/active changes
+                config_path = get_devices_yaml_path()
+                app_config = AppConfig.load_from_yaml(config_path)
+                device = next(
+                    (d for d in app_config.devices if d.name == device_name),
+                    None,
+                )
+                if not device or not device.active:
+                    logger.info(
+                        "Device '%s' is no longer active. Stopping poll loop.",
+                        device_name,
+                    )
+                    break
 
-            if not device or not device.active:
-                logger.info("Device '%s' is no longer active or configured. Stopping poll loop.", device_name)
-                break
+                # Reuse engine across iterations; only recreate on host/port change
+                device_unsupported = unsupported_registers.get(device_name)
+                if (
+                    engine is None
+                    or device.host != current_host
+                    or device.port != current_port
+                ):
+                    if engine is not None:
+                        await engine.client.close()
+                    engine = ModbusControlEngine(
+                        device,
+                        unsupported_registers=device_unsupported,
+                    )
+                    current_host = device.host
+                    current_port = device.port
+                else:
+                    engine.unsupported_registers = device_unsupported or set()
 
-            # Initialize engine for this iteration with known unsupported registers
-            device_unsupported = unsupported_registers.get(device_name)
-            engine = ModbusControlEngine(device, unsupported_registers=device_unsupported)
-            new_vals = await engine.read_all()
+                new_vals = await engine.read_all()
 
-            # Record any new unsupported registers
-            if engine.newly_failed_registers:
-                if device_name not in unsupported_registers:
-                    unsupported_registers[device_name] = set()
-                unsupported_registers[device_name].update(engine.newly_failed_registers)
-                logger.info("Device '%s' has unsupported registers dynamically filtered: %s", device_name, engine.newly_failed_registers)
+                if engine.newly_failed_registers:
+                    if device_name not in unsupported_registers:
+                        unsupported_registers[device_name] = set()
+                    unsupported_registers[device_name].update(
+                        engine.newly_failed_registers
+                    )
+                    logger.info(
+                        "Device '%s' new unsupported registers: %s",
+                        device_name,
+                        engine.newly_failed_registers,
+                    )
 
-            now = time.time()
+                now = time.time()
+                prev_online = device_status.get(device_name, {}).get("online")
+                device_status[device_name] = {
+                    "online": True,
+                    "last_poll": now,
+                    "error": None,
+                }
+                if prev_online is not True:
+                    await _broadcast_status(device_name)
 
-            # Mark device as online
-            prev_online = device_status.get(device_name, {}).get("online")
-            device_status[device_name] = {"online": True, "last_poll": now, "error": None}
+                await update_device_values_and_broadcast(device_name, new_vals)
+                await asyncio.sleep(device.polling_interval)
 
-            # Broadcast status update if state changed to online
-            if prev_online is not True:
-                await _broadcast_status(device_name)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                # pymodbus can swallow CancelledError and re-raise it as a
+                # plain Exception ("Request cancelled outside library").
+                # Detect this via Task.cancelling() and propagate correctly.
+                curr = asyncio.current_task()
+                if curr is not None and curr.cancelling() > 0:
+                    raise asyncio.CancelledError() from e
+                logger.error(
+                    "Error in polling loop for device '%s': %s", device_name, e
+                )
+                prev_online = device_status.get(device_name, {}).get("online")
+                device_status[device_name] = {
+                    "online": False,
+                    "last_poll": device_status.get(
+                        device_name, {}
+                    ).get("last_poll"),
+                    "error": str(e),
+                }
+                if prev_online is not False:
+                    await _broadcast_status(device_name)
+                # Connection broke — discard engine so a fresh one is built
+                if engine is not None and not engine.client.connected:
+                    await engine.client.close()
+                    engine = None
+                    current_host = None
+                    current_port = None
+                await asyncio.sleep(5.0)
 
-            # Update cache and broadcast deltas
-            await update_device_values_and_broadcast(device_name, new_vals)
-
-            # Sleep matching device configuration interval
-            await asyncio.sleep(device.polling_interval)
-
-        except asyncio.CancelledError:
-            logger.info("Polling loop for device '%s' cancelled.", device_name)
-            break
-        except Exception as e:
-            logger.error("Error in polling loop for device '%s': %s", device_name, e)
-            # Mark device as offline and broadcast
-            prev_online = device_status.get(device_name, {}).get("online")
-            device_status[device_name] = {
-                "online": False,
-                "last_poll": device_status.get(device_name, {}).get("last_poll"),
-                "error": str(e),
-            }
-            if prev_online is not False:
-                await _broadcast_status(device_name)
-            await asyncio.sleep(5.0)  # wait before retrying on error
+    except asyncio.CancelledError:
+        logger.info("Polling loop for device '%s' cancelled.", device_name)
+    finally:
+        if engine is not None:
+            await engine.client.close()
 
 
 async def _broadcast_status(device_name: str):
@@ -157,6 +214,7 @@ def restart_device_polling(device_name: str):
     polling_tasks.pop(device_name, None)
     device_caches.pop(device_name, None)
     unsupported_registers.pop(device_name, None)
+    device_semaphores.pop(device_name, None)  # reset semaphore on restart
     # Mark as unknown/offline until first successful poll
     device_status[device_name] = {
         "online": False,
@@ -191,10 +249,19 @@ async def lifespan(app: FastAPI):
     # Startup: sync and launch polling
     sync_polling_tasks()
     yield
-    # Shutdown: cancel all tasks
+    # Shutdown: cancel all tasks, wait at most 15 s so Ctrl+C is never stuck
     for name, task in list(polling_tasks.items()):
         task.cancel()
-    await asyncio.gather(*polling_tasks.values(), return_exceptions=True)
+    if polling_tasks:
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(
+                    *polling_tasks.values(), return_exceptions=True
+                ),
+                timeout=15.0,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("Polling tasks did not finish within shutdown timeout.")
 
 app = FastAPI(title=f"{config.SUITE_TITLE} - API Server", lifespan=lifespan)
 
@@ -320,6 +387,7 @@ async def delete_device(name: str):
     device_caches.pop(name, None)
     device_status.pop(name, None)
     unsupported_registers.pop(name, None)
+    device_semaphores.pop(name, None)
     return {"status": "ok"}
 
 
@@ -352,7 +420,7 @@ async def get_available_schemas_list():
         raise HTTPException(status_code=500, detail=f"Failed to load available schemas: {e}")
 
 
-@app.get("/api/schemas/{schema_name}")
+@app.get("/api/schemas/{schema_name:path}")
 async def get_schema_by_name(schema_name: str):
     """Resolve and return a schema specification directly by its schema name (e.g. v20, v30)."""
     try:
@@ -367,7 +435,13 @@ async def get_device_values(name: str):
     # Return from our fast cache
     if name not in device_caches:
         raise HTTPException(status_code=404, detail=f"Device '{name}' values not available.")
-    return device_caches[name]
+    # Sanitize non-finite floats (nan/inf) to None so json.dumps doesn't crash.
+    # Holding registers with no value configured return 0x7FC00000 (float NaN).
+    def _clean(v: Any) -> Any:
+        if isinstance(v, float) and not math.isfinite(v):
+            return None
+        return v
+    return {k: _clean(v) for k, v in device_caches[name].items()}
 
 
 @app.post("/api/devices/{name}/write")
@@ -377,30 +451,39 @@ async def write_device_registers(name: str, request: WriteBatchRequest):
     device = next((d for d in app_config.devices if d.name == name), None)
     if not device:
         raise HTTPException(status_code=404, detail=f"Device '{name}' not found.")
-    try:
-        engine = ModbusControlEngine(device)
-        results = await engine.write_registers(request.writes)
-        
-        # After a successful write, read back all registers once to update cache and push values to UI (essential for inactive devices)
+    sem = _get_semaphore(name)
+    async with sem:
         try:
-            device_unsupported = unsupported_registers.get(name)
-            engine_read = ModbusControlEngine(device, unsupported_registers=device_unsupported)
-            read_vals = await engine_read.read_all()
-            await update_device_values_and_broadcast(name, read_vals)
-            
-            # Update status as online since we just wrote and read successfully
-            device_status[name] = {"online": True, "last_poll": time.time(), "error": None}
-            await _broadcast_status(name)
-        except Exception as read_err:
-            logger.warning("Could not read back registers after write for device %s: %s", name, read_err)
+            engine = ModbusControlEngine(device)
+            results = await engine.write_registers(request.writes)
+            try:
+                device_unsupported = unsupported_registers.get(name)
+                engine_read = ModbusControlEngine(
+                    device, unsupported_registers=device_unsupported
+                )
+                read_vals = await engine_read.read_all()
+                await update_device_values_and_broadcast(name, read_vals)
+                device_status[name] = {
+                    "online": True,
+                    "last_poll": time.time(),
+                    "error": None,
+                }
+                await _broadcast_status(name)
+            except Exception as read_err:  # noqa: BLE001
+                logger.warning(
+                    "Read-back after write failed for %s: %s", name, read_err
+                )
+            return results
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(
+                status_code=500, detail=f"Failed to execute writes: {e}"
+            )
 
-        return results
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to execute writes: {e}")
 
 # ---------------------------------------------------------------------------
 # WebSocket Endpoint
 # ---------------------------------------------------------------------------
+
 
 @app.websocket("/ws/telemetry")
 async def websocket_endpoint(websocket: WebSocket):

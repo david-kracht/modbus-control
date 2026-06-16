@@ -1,5 +1,6 @@
 import asyncio
 from datetime import datetime
+import math
 import os
 import re
 import sys
@@ -77,6 +78,20 @@ def parse_ordinal_value(val_str: str) -> float | int:
     if "." in num_str:
         return float(num_str)
     return int(num_str)
+
+
+def is_holding_register_sentinel(val, data_type) -> bool:
+    """Returns True when a holding-register value is the 'unset' sentinel:
+    - None         (backend serialises NaN floats as null/None)
+    - float('nan') (engine.read_all() may return nan for unset float32 HRs)
+    - -1           (default for integer holding registers)
+    """
+    if val is None:
+        return True
+    dt_str = data_type.value if hasattr(data_type, "value") else str(data_type)
+    if dt_str == "float32":
+        return isinstance(val, float) and math.isnan(val)
+    return val == -1
 
 def resolve_device(
     target: Optional[str] = None,
@@ -244,9 +259,12 @@ def run_tui_dashboard_impl(
     selected_index = 0
     filter_text = ""
     filter_focused = False
-    active_modal = None  # None, "write", "add_device", "edit_device", "select_registers", "help"
+    active_modal = None  # None, "write", "write_enum", "add_device", "edit_device", "select_registers", "help"
     previous_device_modal = None
     write_value_buffer = ""
+    write_enum_options: list = []   # list of (int_code, label_str) for enum picker
+    write_enum_index = 0
+    write_enum_selected: "int | None" = None  # currently toggled code
     device_form_fields = {"name": "", "host": "", "port": "502", "unit_id": "1", "schema_name": config.DEFAULT_MODBUS_SCHEMA, "polling_interval": "1.0", "registers": ""}
     device_form_cursor = 0
     paused = False
@@ -602,19 +620,117 @@ def run_tui_dashboard_impl(
                 Layout(name="main_table", ratio=3),
                 Layout(name="modal_view", ratio=2)
             )
-            # Render Modal
+            # Render free-text write modal
             selected_reg = filtered_regs[selected_index]
+            cur_val = raw_results.get(selected_reg.name)
+            is_sentinel = is_holding_register_sentinel(cur_val, selected_reg.data_type)
+            if is_sentinel:
+                cur_val_str = "[dim]\u2014 not configured \u2014[/dim]"
+                prompt_str = "[dim]Not configured \u2014 enter a value to set:[/dim]"
+            else:
+                dt_str = (
+                    selected_reg.data_type.value
+                    if hasattr(selected_reg.data_type, "value")
+                    else str(selected_reg.data_type)
+                )
+                if dt_str == "float32" and isinstance(cur_val, float):
+                    cur_val_str = f"[bold]{cur_val:.2f}[/bold]"
+                else:
+                    cur_val_str = f"[bold]{cur_val}[/bold]"
+                prompt_str = "[dim]Enter new value:[/dim]"
+            unit_str = f" {selected_reg.unit}" if selected_reg.unit else ""
             modal_content = [
-                Text.from_markup(f"Name: [bold cyan]{selected_reg.name}[/bold cyan]\n"),
-                Text.from_markup(f"Addr: [yellow]{selected_reg.address_dec}[/yellow] ({selected_reg.register_type.value})\n\n"),
-                Text.from_markup(f"Current Value: [bold]{raw_results.get(selected_reg.name, 'N/A')}[/bold]\n\n"),
-                Text.from_markup(f"New Value: [bold green]{write_value_buffer}[/bold green]▎\n\n\n"),
-                Text.from_markup(f"   [bold]{escape('[Enter]')} Stage[/bold]    [dim]{escape('[Esc]')} Cancel[/dim]")
+                Text.from_markup(
+                    f"Name: [bold cyan]{escape(selected_reg.name)}[/bold cyan]\n"
+                ),
+                Text.from_markup(
+                    f"Addr: [yellow]{selected_reg.address_dec}[/yellow]"
+                    f" ({selected_reg.register_type.value})\n"
+                ),
+                Text.from_markup(
+                    f"Type: [magenta]{selected_reg.data_type.value if hasattr(selected_reg.data_type, 'value') else selected_reg.data_type}[/magenta]"
+                    f"{unit_str}\n\n"
+                ),
+                Text.from_markup(f"Current: {cur_val_str}\n"),
+                Text.from_markup(f"{prompt_str}\n"),
+                Text.from_markup(
+                    f"[bold green]{write_value_buffer}[/bold green]\u258e\n\n"
+                ),
+                Text.from_markup(
+                    f"   [bold]{escape('[Enter]')} Stage[/bold]"
+                    f"    [dim]{escape('[Esc]')} Cancel[/dim]"
+                ),
             ]
             layout["modal_view"].update(
                 Panel(
                     Align.left(Text.join(Text("\n"), modal_content)),
-                    title="Write Register",
+                    title="Edit Register",
+                    box=box.ROUNDED,
+                    style="yellow"
+                )
+            )
+        elif active_modal == "write_enum" and filtered_regs:
+            layout["main_content"].split_row(
+                Layout(name="main_table", ratio=3),
+                Layout(name="modal_view", ratio=2)
+            )
+            # Render enum picker modal
+            selected_reg = filtered_regs[selected_index]
+            cur_val = raw_results.get(selected_reg.name)
+            is_sentinel = is_holding_register_sentinel(cur_val, selected_reg.data_type)
+            if is_sentinel:
+                cur_val_str = "[dim]\u2014 not configured \u2014[/dim]"
+            else:
+                try:
+                    cur_label = (
+                        selected_reg.enum_values.get(int(cur_val), str(cur_val))
+                        if selected_reg.enum_values else str(cur_val)
+                    )
+                    cur_val_str = f"[bold]{escape(cur_label)} ({cur_val})[/bold]"
+                except (TypeError, ValueError):
+                    cur_val_str = f"[bold]{cur_val}[/bold]"
+            enum_lines = [
+                f"Name: [bold cyan]{escape(selected_reg.name)}[/bold cyan]",
+                f"Addr: [yellow]{selected_reg.address_dec}[/yellow]"
+                f" ({selected_reg.register_type.value})",
+                "",
+                f"Current: {cur_val_str}",
+                "",
+            ]
+            safe_idx = (
+                write_enum_index % len(write_enum_options)
+                if write_enum_options else 0
+            )
+            for i, (code, label) in enumerate(write_enum_options):
+                is_current = (
+                    not is_sentinel
+                    and cur_val is not None
+                    and int(cur_val) == code
+                )
+                is_highlighted = (i == safe_idx)
+                is_toggled = (write_enum_selected == code)
+                if is_toggled:
+                    check = "[bold green]x[/bold green]"
+                elif is_current:
+                    check = "[dim]◆[/dim]"
+                else:
+                    check = " "
+                if is_highlighted:
+                    enum_lines.append(
+                        f"[bold yellow]> [{check}] {escape(label)} ({code})[/bold yellow]"
+                    )
+                else:
+                    enum_lines.append(f"  [{check}] {escape(label)} ({code})")
+            enum_lines += [
+                "",
+                f"   [bold]{escape('[Space]')} Toggle[/bold]"
+                f"   [bold]{escape('[Enter]')} Confirm[/bold]"
+                f"    [dim]{escape('[Esc]')} Cancel[/dim]",
+            ]
+            layout["modal_view"].update(
+                Panel(
+                    Align.left(Text.from_markup("\n".join(enum_lines))),
+                    title="Select Value",
                     box=box.ROUNDED,
                     style="yellow"
                 )
@@ -705,8 +821,11 @@ def run_tui_dashboard_impl(
             else:
                 action_str = "[Read]"
 
+            _is_hr = reg.register_type in (ModbusRegisterType.HOLDING_REGISTER, "holding_register")
             if not online and not is_staged:
                 val_markup = "[bold red]Offline / Error[/bold red]"
+            elif not is_staged and _is_hr and is_holding_register_sentinel(val, reg.data_type):
+                val_markup = ""  # blank — sentinel / not yet configured
             elif val is None:
                 val_markup = "[bold red]Offline / Error[/bold red]"
             else:
@@ -769,6 +888,13 @@ def run_tui_dashboard_impl(
             help_str = "Press any key to close help"
         elif active_modal == "write":
             help_str = f"{escape('[Esc]')} cancel | {escape('[Enter]')} stage value"
+        elif active_modal == "write_enum":
+            help_str = (
+                f"{escape('[↑/↓]')} navigate"
+                f" | {escape('[Space]')} toggle"
+                f" | {escape('[Enter]')} confirm"
+                f" | {escape('[Esc]')} cancel"
+            )
         elif filter_focused:
             help_str = f"{escape('[Esc]')} exit filter | {escape('[Enter]')} confirm filter | Type search"
         elif focused_panel == "devices":
@@ -785,7 +911,7 @@ def run_tui_dashboard_impl(
         layout["footer"].update(Align.center(footer_text, vertical="middle"))
 
     async def main_loop():
-        nonlocal selected_index, filter_text, filter_focused, active_modal, write_value_buffer, paused, status_message, last_poll_time, raw_results, online, error_msg, last_successful_poll_time
+        nonlocal selected_index, filter_text, filter_focused, active_modal, write_value_buffer, write_enum_options, write_enum_index, write_enum_selected, paused, status_message, last_poll_time, raw_results, online, error_msg, last_successful_poll_time
         nonlocal device, engine, devices, selected_device_index, focused_panel, device_form_cursor, device_form_fields
         nonlocal previous_device_modal, register_select_list, register_select_checked, register_select_index, register_select_filter
         nonlocal schema_select_list, schema_select_index
@@ -1071,18 +1197,70 @@ def run_tui_dashboard_impl(
                         try:
                             parsed_val = parse_ordinal_value(write_value_buffer)
                             original_val = raw_results.get(selected_reg.name)
-                            if parsed_val == original_val:
+                            # Only unstage if original is a real (non-sentinel) value and matches
+                            if (not is_holding_register_sentinel(original_val, selected_reg.data_type)
+                                    and parsed_val == original_val):
                                 staged_changes.pop(selected_reg.name, None)
                                 status_message = f"[grey]Cleared staged change for {selected_reg.name}[/grey]"
                             else:
                                 staged_changes[selected_reg.name] = parsed_val
-                                status_message = f"[yellow]Staged: {selected_reg.name} set to {parsed_val}[/yellow]"
+                                status_message = f"[yellow]Staged: {selected_reg.name} \u2192 {parsed_val}[/yellow]"
                         except Exception as ex:
                             status_message = f"[red]Error: {ex}[/red]"
                         finally:
                             active_modal = None
                     elif len(key) == 1 and key.isprintable():
                         write_value_buffer += key
+
+                elif active_modal == "write_enum" and filtered_regs:
+                    if key == "\x1b":  # Escape
+                        active_modal = None
+                        write_enum_selected = None
+                        status_message = ""
+                    elif key in ("\x1b[A", "\x1bOA"):  # Up
+                        write_enum_index = max(0, write_enum_index - 1)
+                    elif key in ("\x1b[B", "\x1bOB"):  # Down
+                        write_enum_index = min(
+                            len(write_enum_options) - 1, write_enum_index + 1
+                        )
+                    elif key == " " and write_enum_options:  # Space: toggle selection
+                        safe_idx = write_enum_index % len(write_enum_options)
+                        code, _ = write_enum_options[safe_idx]
+                        # Toggle: select this code, deselect if already selected
+                        write_enum_selected = code if write_enum_selected != code else None
+                    elif key in ("\r", "\n") and write_enum_options:  # Enter: confirm
+                        selected_reg = filtered_regs[selected_index]
+                        # If nothing toggled via Space, use the highlighted row
+                        safe_idx = write_enum_index % len(write_enum_options)
+                        chosen_code = (
+                            write_enum_selected
+                            if write_enum_selected is not None
+                            else write_enum_options[safe_idx][0]
+                        )
+                        chosen_label = next(
+                            (lbl for c, lbl in write_enum_options if c == chosen_code),
+                            str(chosen_code),
+                        )
+                        original_val = raw_results.get(selected_reg.name)
+                        if (
+                            not is_holding_register_sentinel(
+                                original_val, selected_reg.data_type
+                            )
+                            and chosen_code == int(original_val)
+                        ):
+                            staged_changes.pop(selected_reg.name, None)
+                            status_message = (
+                                f"[grey]Cleared staged change for "
+                                f"{selected_reg.name}[/grey]"
+                            )
+                        else:
+                            staged_changes[selected_reg.name] = chosen_code
+                            status_message = (
+                                f"[yellow]Staged: {selected_reg.name} → "
+                                f"{chosen_label} ({chosen_code})[/yellow]"
+                            )
+                        write_enum_selected = None
+                        active_modal = None
 
                 else:
                     # Focus Switching
@@ -1262,8 +1440,37 @@ def run_tui_dashboard_impl(
                                     status_message = "[red]Error: Could not read coil to toggle[/red]"
                         else:
                             # Open Edit Modal for Holding Registers (will be staged on confirm)
-                            active_modal = "write"
-                            write_value_buffer = ""
+                            cur_val = raw_results.get(selected_reg.name)
+                            if selected_reg.enum_values:
+                                # Enum register: open picker modal
+                                write_enum_options = sorted(
+                                    [(int(k), v) for k, v in selected_reg.enum_values.items()],
+                                    key=lambda x: x[0]
+                                )
+                                write_enum_index = 0
+                                write_enum_selected = None
+                                if not is_holding_register_sentinel(
+                                    cur_val, selected_reg.data_type
+                                ):
+                                    try:
+                                        cur_code = int(cur_val)
+                                        for _ei, (_ec, _) in enumerate(write_enum_options):
+                                            if _ec == cur_code:
+                                                write_enum_index = _ei
+                                                write_enum_selected = cur_code
+                                                break
+                                    except (TypeError, ValueError):
+                                        pass
+                                active_modal = "write_enum"
+                            else:
+                                # Numeric/text register: open free-text modal
+                                write_value_buffer = ""
+                                if not is_holding_register_sentinel(
+                                    cur_val, selected_reg.data_type
+                                ):
+                                    write_value_buffer = str(cur_val)
+                                active_modal = "write"
+                            write_enum_selected = None
                             status_message = ""
 
             # 4. Check if clock time changed

@@ -6,7 +6,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Path to the shared devices YAML file
-MODBUS_DEVICES_YAML: Path = Path(os.getenv("MODBUS_DEVICES_YAML", "devices.yaml")).resolve()
+MODBUS_DEVICES_YAML: Path = Path(
+    os.getenv("MODBUS_DEVICES_YAML", "devices.yaml")
+).resolve()
 
 # Control Center Backend Settings
 CTRL_CENTER_HOST: str = os.getenv("CTRL_CENTER_HOST", "0.0.0.0")
@@ -16,10 +18,20 @@ CTRL_CENTER_PORT: int = int(os.getenv("CTRL_CENTER_PORT", "8080"))
 DEFAULT_MODBUS_HOST: str | None = os.getenv("DEFAULT_MODBUS_HOST", None)
 DEFAULT_MODBUS_PORT: int = int(os.getenv("DEFAULT_MODBUS_PORT", "502"))
 DEFAULT_MODBUS_UNIT_ID: int = int(os.getenv("DEFAULT_MODBUS_UNIT_ID", "1"))
-DEFAULT_MODBUS_SCHEMA: str = os.getenv("DEFAULT_MODBUS_SCHEMA", "modbus_config/latest")
+DEFAULT_MODBUS_SCHEMA: str = os.getenv(
+    "DEFAULT_MODBUS_SCHEMA", "modbus_config/latest"
+)
 
 # Polling configuration
-DEFAULT_POLLING_INTERVAL: float = float(os.getenv("DEFAULT_POLLING_INTERVAL", "1.0"))
+DEFAULT_POLLING_INTERVAL: float = float(
+    os.getenv("DEFAULT_POLLING_INTERVAL", "1.0")
+)
+
+# Maximum concurrent TCP connections per device (1–6).
+# Prevents overloading devices that limit simultaneous connections.
+MAX_CONNECTIONS_PER_DEVICE: int = max(
+    1, min(6, int(os.getenv("MAX_CONNECTIONS_PER_DEVICE", "3")))
+)
 
 # Customization Settings
 SUITE_TITLE: str = os.getenv("SUITE_TITLE", "Modbus Control Suite")

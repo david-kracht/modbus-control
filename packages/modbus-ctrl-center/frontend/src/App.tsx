@@ -327,59 +327,92 @@ export default function App() {
     }
   };
 
-  // 3. Manage WebSocket connection for live deltas and status updates
+  // 3. Manage WebSocket connection for live deltas and status updates.
+  // Uses exponential backoff reconnect so the page survives backend restarts.
+  const selectedDeviceNameRef = useRef<string>(selectedDeviceName);
+  useEffect(() => {
+    selectedDeviceNameRef.current = selectedDeviceName;
+  }, [selectedDeviceName]);
+
   useEffect(() => {
     const wsBase = import.meta.env.VITE_WS_URL || (API_BASE ? API_BASE.replace(/^http/, "ws") : "");
-    const wsUrl = wsBase 
-      ? `${wsBase}/ws/telemetry` 
+    const wsUrl = wsBase
+      ? `${wsBase}/ws/telemetry`
       : `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}/ws/telemetry`;
 
-    logger("Connecting to WebSocket: " + wsUrl);
-    const ws = new WebSocket(wsUrl);
-    wsRef.current = ws;
+    let destroyed = false;
+    let retryDelay = 1000; // ms, doubles on each failure up to 5 s
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
 
-    ws.onopen = () => {
-      logger("WebSocket connection established");
-      setWsConnected(true);
-    };
+    const connect = () => {
+      if (destroyed) return;
+      logger("Connecting to WebSocket: " + wsUrl);
+      const ws = new WebSocket(wsUrl);
+      wsRef.current = ws;
 
-    ws.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        if (data.type === "status_update") {
-          logger("Status update received: " + JSON.stringify(data));
-          setDeviceStatuses((prev) => ({
-            ...prev,
-            [data.device_name]: {
-              online: data.online,
-              last_poll: data.last_poll,
-              error: data.error
-            }
-          }));
-          return;
+      ws.onopen = () => {
+        logger("WebSocket connection established");
+        retryDelay = 1000; // reset backoff on success
+        setWsConnected(true);
+        // Re-fetch values so UI is current after a reconnect
+        const current = selectedDeviceNameRef.current;
+        if (current) fetchSchemaAndValues(current);
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.type === "status_update") {
+            setDeviceStatuses((prev) => ({
+              ...prev,
+              [data.device_name]: {
+                online: data.online,
+                last_poll: data.last_poll,
+                error: data.error,
+              },
+            }));
+            return;
+          }
+          if (data.device_name === selectedDeviceNameRef.current) {
+            setValues((prev) => ({ ...prev, ...data.deltas }));
+          }
+        } catch (e) {
+          console.error("Error parsing WS message:", e);
         }
+      };
 
-        if (data.device_name === selectedDeviceName) {
-          logger("Delta telemetry received: " + JSON.stringify(data.deltas));
-          setValues((prev) => ({
-            ...prev,
-            ...data.deltas,
-          }));
-        }
-      } catch (e) {
-        console.error("Error parsing WS message:", e);
-      }
+      ws.onclose = () => {
+        if (destroyed) return;
+        logger(`WebSocket disconnected – reconnecting in ${retryDelay}ms`);
+        setWsConnected(false);
+        // Backend is unreachable – mark all devices offline immediately
+        setDeviceStatuses((prev) => {
+          const updated: Record<string, DeviceStatus> = {};
+          for (const name of Object.keys(prev)) {
+            updated[name] = { ...prev[name], online: false, error: "Backend offline" };
+          }
+          return updated;
+        });
+        retryTimer = setTimeout(() => {
+          retryDelay = Math.min(retryDelay * 2, 5_000);
+          connect();
+        }, retryDelay);
+      };
+
+      ws.onerror = () => {
+        // onclose fires right after onerror, reconnect logic is there
+        ws.close();
+      };
     };
 
-    ws.onclose = () => {
-      logger("WebSocket disconnected");
-      setWsConnected(false);
-    };
+    connect();
 
     return () => {
-      ws.close();
+      destroyed = true;
+      if (retryTimer !== null) clearTimeout(retryTimer);
+      wsRef.current?.close();
     };
-  }, [selectedDeviceName]);
+  }, []);
 
   const logger = (msg: string) => {
     console.log(`[Modbus Control] ${msg}`);
@@ -582,6 +615,18 @@ export default function App() {
       return Number.isInteger(val) ? val.toFixed(1) : val.toFixed(2);
     }
     return String(val);
+  };
+
+  /**
+   * Returns true when a holding-register value is the EFOY "unset" sentinel:
+   *   • null  — backend serialises NaN floats as null
+   *   • -1    — default for integer holding registers
+   * These sentinels mean "no value configured yet" and must not disable the input.
+   */
+  const isHoldingRegisterSentinel = (val: any, dataType: string): boolean => {
+    if (val === null || val === undefined) return true;
+    if (dataType !== "float32" && val === -1) return true;
+    return false;
   };
 
   return (
@@ -1130,13 +1175,17 @@ export default function App() {
                       const currentVal = values[reg.name];
                       const stagedVal = stagedChanges[reg.name];
                       const isStaged = stagedVal !== undefined;
-                      const hasCurrentVal = currentVal !== undefined && currentVal !== null;
+                      const isSentinel = isHoldingRegisterSentinel(currentVal, reg.data_type);
+                      // hasCurrentVal: true when we have a real (non-sentinel) polled value
+                      const hasCurrentVal = !isSentinel;
+                      // hasLiveValue: true once the device has been polled at all (sentinel counts)
+                      const hasLiveValue = currentVal !== undefined;
                       
-                      // Resolve display value: staged value takes precedence
+                      // Resolve display value: staged takes precedence; sentinel → empty
                       const displayVal = isStaged
                         ? formatDisplayVal(stagedVal, reg.data_type)
                         : (hasCurrentVal ? formatDisplayVal(currentVal, reg.data_type) : "");
-                      // For enum select: find the current ordinal key
+                      // For enum select: staged takes precedence; sentinel → "" (placeholder)
                       const enumSelectVal = isStaged
                         ? String(stagedVal)
                         : (hasCurrentVal ? String(currentVal) : "");
@@ -1163,11 +1212,13 @@ export default function App() {
                               <select
                                 value={enumSelectVal}
                                 onChange={(e) => handleStageChange(reg.name, Number(e.target.value), currentVal)}
-                                disabled={!hasCurrentVal}
+                                disabled={!hasLiveValue}
                                 className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
                               >
-                                {!hasCurrentVal && <option value="">Loading...</option>}
-                                {hasCurrentVal && Object.entries(reg.enum_values).map(([code, label]) => (
+                                {isSentinel && !isStaged && (
+                                  <option value="" disabled>— select —</option>
+                                )}
+                                {Object.entries(reg.enum_values).map(([code, label]) => (
                                   <option key={code} value={code}>{label}</option>
                                 ))}
                               </select>
@@ -1179,8 +1230,8 @@ export default function App() {
                                   inputMode="decimal"
                                   value={displayVal}
                                   onChange={(e) => handleStageChange(reg.name, e.target.value, currentVal)}
-                                  placeholder={hasCurrentVal ? formatDisplayVal(currentVal, reg.data_type) : "Offline"}
-                                  disabled={!hasCurrentVal}
+                                  placeholder={hasCurrentVal ? formatDisplayVal(currentVal, reg.data_type) : (hasLiveValue ? "" : "Offline")}
+                                  disabled={!hasLiveValue}
                                   className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-3 pr-10 py-2 text-xs text-white font-mono focus:outline-none focus:border-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
                                 />
                                 {reg.unit && (
@@ -1195,8 +1246,8 @@ export default function App() {
                                   step="1"
                                   value={displayVal}
                                   onChange={(e) => handleStageChange(reg.name, e.target.value, currentVal)}
-                                  placeholder={hasCurrentVal ? formatDisplayVal(currentVal, reg.data_type) : "Offline"}
-                                  disabled={!hasCurrentVal}
+                                  placeholder={hasCurrentVal ? formatDisplayVal(currentVal, reg.data_type) : (hasLiveValue ? "" : "Offline")}
+                                  disabled={!hasLiveValue}
                                   className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-3 pr-10 py-2 text-xs text-white focus:outline-none focus:border-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
                                 />
                                 {reg.unit && (
@@ -1211,6 +1262,11 @@ export default function App() {
                             <span className="text-[10px] text-slate-400 italic mt-0.5 flex items-center gap-1">
                               <Info className="h-3 w-3" />
                               Original: {formatDisplayVal(currentVal, reg.data_type)} {reg.unit || ""}
+                            </span>
+                          )}
+                          {isSentinel && !isStaged && hasLiveValue && (
+                            <span className="text-[10px] text-slate-500 italic mt-0.5">
+                              Not configured — enter a value to set
                             </span>
                           )}
 
