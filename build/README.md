@@ -78,4 +78,28 @@ uv pip install ./my_project_whls/*.whl \
   --find-links ./prebuild_armv7_whls
 ```
 
-*Explanation: By appending `--no-index`, you prevent `uv` from communicating with the internet. It relies 100% on the copied folders.*
+or
+
+```bash
+scp wheelhouse/my_project_whls/*.whl \
+    wheelhouse/own_build_armv7_whls/*.whl \
+    wheelhouse/prebuild_armv7_whls/*.whl \
+    <user>@<host>:/tmp/
+
+# On the router:
+rm -rf /mnt/ext1/modbus-ctrl-venv
+python3 -m venv --without-pip /mnt/ext1/modbus-ctrl-venv
+
+# Bootstrap pip via system pip3 into venv site-packages (cd / avoids "folder not found")
+cd / && /usr/bin/pip3 install \
+    --find-links /tmp \
+    --target /mnt/ext1/modbus-ctrl-venv/lib/python3.11/site-packages \
+    pip setuptools wheel packaging
+
+# Install all packages fully offline (use -m pip, not bin/pip — --target skips bin/ scripts)
+/mnt/ext1/modbus-ctrl-venv/bin/python3 -m pip install \
+    --no-index --find-links /tmp \
+    modbus-ctrl-cli modbus-ctrl-center
+```
+
+*Explanation: By appending `--no-index`, pip uses only the local `/tmp/wheels` folder. The `PYTHONPATH` trick works because a `.whl` file is a valid zip archive that Python can import from directly — no extraction needed.*

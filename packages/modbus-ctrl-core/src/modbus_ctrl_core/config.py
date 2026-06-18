@@ -1,14 +1,13 @@
 import os
 from pathlib import Path
 from dotenv import load_dotenv
+from modbus_common.config import get_devices_yaml_path
 
 # Load .env file
 load_dotenv()
 
 # Path to the shared devices YAML file
-MODBUS_DEVICES_YAML: Path = Path(
-    os.getenv("MODBUS_DEVICES_YAML", "devices.yaml")
-).resolve()
+MODBUS_DEVICES_YAML: Path = get_devices_yaml_path()
 
 # Control Center Backend Settings
 CTRL_CENTER_HOST: str = os.getenv("CTRL_CENTER_HOST", "0.0.0.0")
