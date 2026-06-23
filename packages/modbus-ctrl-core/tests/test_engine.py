@@ -1,4 +1,5 @@
 from __future__ import annotations
+import pytest
 from modbus_common import DeviceConfig
 from modbus_ctrl_core import ModbusControlEngine
 
@@ -101,3 +102,110 @@ def test_engine_unsupported_registers_filtering():
     assert "SystemOn" not in engine.registers_by_name
     assert "BatIdConfig" in engine.registers_by_name
 
+
+import asyncio
+from unittest.mock import AsyncMock, patch, MagicMock
+
+@pytest.mark.anyio
+@patch('modbus_ctrl_core.engine.ModbusClientWrapper')
+async def test_engine_read_all_success(mock_client_cls):
+    mock_client = MagicMock()
+    mock_client.connect = AsyncMock()
+    mock_client.connected = True
+    
+    # Mock the pymodbus client response
+    mock_pymodbus = MagicMock()
+    
+    # Setup a fake response for read_holding_registers
+    mock_response = MagicMock()
+    mock_response.isError.return_value = False
+    mock_response.registers = [100, 200, 300]
+    
+    mock_pymodbus.read_holding_registers = AsyncMock(return_value=mock_response)
+    mock_pymodbus.read_discrete_inputs = AsyncMock(return_value=mock_response)
+    mock_pymodbus.read_coils = AsyncMock(return_value=mock_response)
+    mock_pymodbus.read_input_registers = AsyncMock(return_value=mock_response)
+    
+    mock_client.client = mock_pymodbus
+    mock_client_cls.return_value = mock_client
+
+    device = DeviceConfig(
+        name="TestSimDevice",
+        host="127.0.0.1",
+        port=5020,
+        schema_name="v10",
+        registers=["BatBocConfig"]
+    )
+    
+    engine = ModbusControlEngine(device)
+    
+    results = await engine.read_all(gap_threshold=5)
+    assert "BatBocConfig" in results
+    mock_client.connect.assert_called()
+    mock_pymodbus.read_holding_registers.assert_called()
+
+@pytest.mark.anyio
+@patch('modbus_ctrl_core.engine.ModbusClientWrapper')
+async def test_engine_read_all_fallback(mock_client_cls):
+    mock_client = MagicMock()
+    mock_client.connect = AsyncMock()
+    mock_client.connected = True
+    
+    mock_pymodbus = MagicMock()
+    
+    # First response fails
+    mock_fail = MagicMock()
+    mock_fail.isError.return_value = True
+    
+    # Second response succeeds (fallback)
+    mock_succ = MagicMock()
+    mock_succ.isError.return_value = False
+    mock_succ.registers = [50, 60]
+    
+    mock_pymodbus.read_holding_registers = AsyncMock(side_effect=[mock_fail, mock_succ])
+    
+    mock_client.client = mock_pymodbus
+    mock_client_cls.return_value = mock_client
+
+    device = DeviceConfig(name="TestSimDevice", host="127.0.0.1", schema_name="v10", registers=["BatBocConfig"])
+    engine = ModbusControlEngine(device)
+    
+    results = await engine.read_all(gap_threshold=5)
+    assert "BatBocConfig" in results
+
+@pytest.mark.anyio
+@patch('modbus_ctrl_core.engine.ModbusClientWrapper')
+async def test_engine_write_registers(mock_client_cls):
+    mock_client = MagicMock()
+    mock_client.connect = AsyncMock()
+    mock_client.connected = True
+    mock_pymodbus = MagicMock()
+    
+    mock_write_res = MagicMock()
+    mock_write_res.isError.return_value = False
+    mock_pymodbus.write_register = AsyncMock(return_value=mock_write_res)
+    mock_pymodbus.write_registers = AsyncMock(return_value=mock_write_res)
+    
+    mock_client.client = mock_pymodbus
+    mock_client_cls.return_value = mock_client
+
+    device = DeviceConfig(name="TestSimDevice", host="127.0.0.1", schema_name="v10", registers=["BatBocConfig"])
+    engine = ModbusControlEngine(device)
+    
+    results = await engine.write_registers({"BatBocConfig": 150})
+    assert results["BatBocConfig"] == "Success"
+    mock_pymodbus.write_registers.assert_called()
+
+@pytest.mark.anyio
+@patch('modbus_ctrl_core.engine.ModbusClientWrapper')
+async def test_engine_write_invalid(mock_client_cls):
+    mock_client = MagicMock()
+    mock_client.connect = AsyncMock()
+    mock_client.connected = True
+    mock_client_cls.return_value = mock_client
+
+    device = DeviceConfig(name="TestSimDevice", host="127.0.0.1", schema_name="v10", registers=["BatBocConfig"])
+    engine = ModbusControlEngine(device)
+    
+    results = await engine.write_registers({"NonexistentReg": 150})
+    assert "Error: Register not found in schema" in results["NonexistentReg"]
