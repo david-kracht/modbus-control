@@ -182,6 +182,8 @@ def run_tui_dashboard_impl(
     interval: float = 1.0,
     timezone: str = "local",
     time_format: str = "%Y-%m-%d %H:%M:%S",
+    force_numbers: bool = True,
+    null_label: str = "N/A",
 ):
     """
     Initializes and runs the rich-based Terminal User Interface (TUI) for the Modbus dashboard.
@@ -823,26 +825,35 @@ def run_tui_dashboard_impl(
 
             _is_hr = reg.register_type in (ModbusRegisterType.HOLDING_REGISTER, "holding_register")
             if not online and not is_staged:
-                val_markup = "[bold red]Offline / Error[/bold red]"
+                val_markup = f"[bold red]{null_label}[/bold red]"
             elif not is_staged and _is_hr and is_holding_register_sentinel(val, reg.data_type):
                 val_markup = ""  # blank — sentinel / not yet configured
             elif val is None:
-                val_markup = "[bold red]Offline / Error[/bold red]"
+                val_markup = f"[bold red]{null_label}[/bold red]"
             else:
-                literal_val = val
-                if reg.enum_values:
-                    try:
-                        int_val = int(val)
-                        literal_val = reg.enum_values.get(int_val, val)
-                    except (TypeError, ValueError):
-                        pass
+                if force_numbers:
+                    if isinstance(val, bool):
+                        literal_val = 1 if val else 0
+                    else:
+                        literal_val = val
+                else:
+                    literal_val = val
+                    if reg.enum_values:
+                        try:
+                            int_val = int(val)
+                            literal_val = reg.enum_values.get(int_val, val)
+                        except (TypeError, ValueError):
+                            pass
 
                 if isinstance(literal_val, bool):
                     val_markup = f"[bold green]True[/bold green]" if literal_val else f"[bold red]False[/bold red]"
                 elif isinstance(literal_val, (int, float)):
                     val_markup = f"[bold yellow]{literal_val}[/bold yellow]"
                 else:
-                    val_markup = f"[bold cyan]\"{literal_val}\"[/bold cyan]"
+                    if force_numbers:
+                        val_markup = f"[bold cyan]{literal_val}[/bold cyan]"
+                    else:
+                        val_markup = f"[bold cyan]\"{literal_val}\"[/bold cyan]"
 
                 if is_staged:
                     val_markup = f"{val_markup} [bold yellow on black]✨ STAGED[/bold yellow on black]"

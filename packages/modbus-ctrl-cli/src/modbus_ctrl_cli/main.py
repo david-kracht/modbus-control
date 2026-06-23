@@ -560,12 +560,14 @@ def read_registers(
     format: str = typer.Option("csv", help="Output format: console, json, yaml, csv, ini, markdown, influx, prometheus, jsonl"),
     enum_mode: str = typer.Option("ordinal", help="Enum formatting: literal (string), ordinal (number)"),
     show_time: bool = typer.Option(True, "--time/--no-time", help="Include timestamp in the output"),
-    time_format: str = typer.Option("%Y-%m-%d %H:%M:%S.%f", "--time-format", help="Timestamp format string"),
+    time_format: str = typer.Option("%Y-%m-%d %H:%M:%S", "--time-format", help="Timestamp format string"),
     timezone: str = typer.Option("local", "--timezone", help="Timezone for the timestamp (e.g. UTC, local, Europe/Berlin)"),
     interval: Optional[float] = typer.Option(None, "--interval", help="Continuously read registers every N seconds"),
-    delimiter: str = typer.Option(";", "--delimiter", help="CSV field delimiter", rich_help_panel="CSV Options"),
+    delimiter: str = typer.Option(",", "--delimiter", help="CSV field delimiter", rich_help_panel="CSV Options"),
     vertical: bool = typer.Option(False, "--vertical/--horizontal", help="Output layout orientation", rich_help_panel="CSV Options"),
     header: bool = typer.Option(False, "--header/--no-header", help="Include headers in output", rich_help_panel="CSV Options"),
+    force_numbers: bool = typer.Option(True, "--force-numbers/--no-force-numbers", help="Force numerical representation (booleans to 0/1, enum ordinal)"),
+    null_label: str = typer.Option("N/A", "--null-label", help="Label for empty or failed register reads"),
     file: Optional[Path] = typer.Option(None, "--file", help="Write output to this file instead of printing to stdout"),
     newline: str = typer.Option("/r/n", "--newline", help="Line ending style for the output file: /r/n or /n"),
 ):
@@ -660,11 +662,20 @@ def read_registers(
 
             # Format values based on enum_mode
             formatted_results = {}
+            if force_numbers:
+                enum_mode = "ordinal"
+                
             for reg in target_regs:
                 name = reg.name
                 val = raw_results.get(name)
+                
                 if val is None:
+                    formatted_results[name] = null_label
                     continue
+                
+                if force_numbers and isinstance(val, bool):
+                    val = 1 if val else 0
+
                 # Enum mapping: enum_values keys are int (dict[int, str])
                 if enum_mode == "literal" and reg.enum_values and val is not None:
                     try:
@@ -717,12 +728,15 @@ def read_registers(
 
             elif format == "csv":
                 def format_csv_cell(key: str, val) -> str:
+                    if val == null_label:
+                        return val
                     if isinstance(val, bool):
                         return str(val)
                     if isinstance(val, (int, float)):
                         return str(val)
                     if key == "Time":
-                        return str(val)
+                        escaped = str(val).replace('"', '""')
+                        return f'"{escaped}"'
                     if isinstance(val, str):
                         escaped = val.replace('"', '""')
                         return f'"{escaped}"'
@@ -737,14 +751,14 @@ def read_registers(
                 if vertical:
                     csv_lines = []
                     if header:
-                        csv_lines.append(f"Register{delimiter}Value")
+                        csv_lines.append(f'"Register"{delimiter}"Value"')
                     for k, v in fields:
-                        csv_lines.append(f"{k}{delimiter}{format_csv_cell(k, v)}")
+                        csv_lines.append(f'"{k}"{delimiter}{format_csv_cell(k, v)}')
                     content = "\n".join(csv_lines)
                 else:
                     csv_lines = []
                     if header:
-                        csv_lines.append(delimiter.join([f[0] for f in fields]))
+                        csv_lines.append(delimiter.join([f'"{f[0]}"' for f in fields]))
                     csv_lines.append(delimiter.join([format_csv_cell(f[0], f[1]) for f in fields]))
                     content = "\n".join(csv_lines)
 
@@ -972,6 +986,8 @@ def run_tui_dashboard(
     interval: float = typer.Option(1.0, "--interval", help="Refresh interval in seconds"),
     timezone: str = typer.Option("local", "--timezone", help="Timezone for the timestamp (e.g. UTC, local, Europe/Berlin)"),
     time_format: str = typer.Option("%Y-%m-%d %H:%M:%S", "--time-format", help="Timestamp format string"),
+    force_numbers: bool = typer.Option(True, "--force-numbers/--no-force-numbers", help="Force numerical representation (booleans to 0/1)"),
+    null_label: str = typer.Option("N/A", "--null-label", help="Label for empty or failed register reads"),
 ):
     """Monitor register values in real-time with an interactive TUI dashboard."""
     from .dashboard import run_tui_dashboard_impl
@@ -984,6 +1000,8 @@ def run_tui_dashboard(
         interval=interval,
         timezone=timezone,
         time_format=time_format,
+        force_numbers=force_numbers,
+        null_label=null_label,
     )
 
 if __name__ == "__main__":
