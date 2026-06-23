@@ -988,8 +988,14 @@ def run_tui_dashboard(
     time_format: str = typer.Option("%Y-%m-%d %H:%M:%S", "--time-format", help="Timestamp format string"),
     force_numbers: bool = typer.Option(True, "--force-numbers/--no-force-numbers", help="Force numerical representation (booleans to 0/1)"),
     null_label: str = typer.Option("N/A", "--null-label", help="Label for empty or failed register reads"),
+    eco: bool = typer.Option(False, "--eco", help="Set UI refresh interval to 0.15s to save CPU"),
+    ui_refresh: float = typer.Option(0.05, "--ui-refresh", help="Custom UI refresh interval (0.01-0.5s)"),
 ):
     """Monitor register values in real-time with an interactive TUI dashboard."""
+    if eco and ui_refresh == 0.05:
+        ui_refresh = 0.15
+    ui_refresh = max(0.01, min(ui_refresh, 0.5))
+    
     from .dashboard import run_tui_dashboard_impl
     run_tui_dashboard_impl(
         target=target,
@@ -1002,6 +1008,7 @@ def run_tui_dashboard(
         time_format=time_format,
         force_numbers=force_numbers,
         null_label=null_label,
+        ui_refresh=ui_refresh,
     )
 
 if __name__ == "__main__":

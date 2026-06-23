@@ -184,6 +184,7 @@ def run_tui_dashboard_impl(
     time_format: str = "%Y-%m-%d %H:%M:%S",
     force_numbers: bool = True,
     null_label: str = "N/A",
+    ui_refresh: float = 0.05,
 ):
     """
     Initializes and runs the rich-based Terminal User Interface (TUI) for the Modbus dashboard.
@@ -1531,7 +1532,7 @@ def run_tui_dashboard_impl(
                 sys.stdout.flush()
 
             # Yield control to the event loop to let background tasks run
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(ui_refresh)
 
     # Put terminal into raw mode and restore it cleanly on exit
     old_settings = termios.tcgetattr(sys.stdin.fileno())
