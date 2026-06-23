@@ -17,4 +17,20 @@ workspace = { members = [
 [dependency-groups]
 dev = [
     "pytest>=7.4.4",
+    "pytest-cov>=4.1.0",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["packages"]
+addopts = "--cov=packages --cov-report=term-missing"
+
+[tool.tox]
+requires = ["tox-uv>=1"]
+env_list = ["py38", "py39", "py310", "py311", "py312", "py313", "py314"]
+
+[tool.tox.env_run_base]
+# uv-venv-lock-runner: tox creates envs via uv and respects uv.lock (reproducible)
+runner = "uv-venv-lock-runner"
+dependency_groups = ["dev"]
+commands = [["pytest", "packages"]]
+uv_sync_flags = ["--all-packages"]
