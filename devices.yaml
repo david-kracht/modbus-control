@@ -1,0 +1,24 @@
+# devices.yaml — Modbus device configuration
+# Auto-created by modbus-common on first run (no devices.yaml found).
+# Edit this file to add your Modbus devices.
+#
+# Required fields per device:
+#   host         — IP address or hostname
+#   port         — Modbus TCP port (default: 502)
+#   unit_id      — Modbus slave unit ID (default: 1)
+#   schema_name  — schema version, e.g. "modbus_config/latest"
+#
+# Optional fields:
+#   name             — unique device name (default: "<host>_<port>")
+#   polling_interval — seconds between polls (default: 1.0)
+#   active           — enable/disable polling (default: true)
+#   registers        — ordered list of register names to query/display
+
+devices:
+- name: SimDevice
+  host: 127.0.0.1
+  port: 5025
+  schema_name: modbus_config/latest
+  registers:
+  - SystemOn
+  - SystemOff

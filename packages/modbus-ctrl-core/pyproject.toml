@@ -2,9 +2,9 @@
 name = "modbus-ctrl-core"
 version = "0.1.0"
 description = "Core async library for Modbus Control Suite"
-requires-python = ">=3.11"
+requires-python = ">=3.8"
 dependencies = [
-    "pymodbus>=3.8.0",
+    "pymodbus>=3.5.0",
     "modbus-common>=0.1.0",
     "modbus-ctrl-contracts>=0.1.0",
     "python-dotenv>=1.0.1",

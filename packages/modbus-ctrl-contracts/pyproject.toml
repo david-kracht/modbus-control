@@ -2,7 +2,7 @@
 name = "modbus-ctrl-contracts"
 version = "0.1.0"
 description = "Contracts package for Modbus Control Software Suite"
-requires-python = ">=3.11"
+requires-python = ">=3.8"
 dependencies = [
     "pydantic>=2.0.0",
     "pyyaml>=6.0.0",

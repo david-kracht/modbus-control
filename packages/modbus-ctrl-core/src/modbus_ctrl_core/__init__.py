@@ -1,3 +1,4 @@
+from __future__ import annotations
 from modbus_common.client import ModbusClientWrapper
 from modbus_ctrl_core.engine import ModbusControlEngine
 from modbus_schema_common.resolver import resolve_schema

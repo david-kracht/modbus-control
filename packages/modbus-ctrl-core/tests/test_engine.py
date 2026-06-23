@@ -1,3 +1,4 @@
+from __future__ import annotations
 from modbus_common import DeviceConfig
 from modbus_ctrl_core import ModbusControlEngine
 
